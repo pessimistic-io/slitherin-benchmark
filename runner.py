@@ -48,7 +48,7 @@ def process_file(filename):
 
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
-@click.option('-i', '--input', help="directory with contracts")
+@click.option('-i', '--input', help="directory with contracts", required=True)
 def main(output, input):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
