@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import subprocess
 import logging
 from multiprocessing import Pool
@@ -8,7 +9,7 @@ import pandas as pd
 import click
 
 from utils import extract_detectors, get_contracts
-#DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
+DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
 
 def slitherAnalyzer(output):
     # Return a dictionary with detector names as keys and True/False as values
@@ -48,8 +49,9 @@ def process_file(filename):
 
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
-@click.option('-i', '--input', help="directory with contracts", required=True)
-def main(output, input):
+@click.option('-i', '--input', help="directory with contracts")
+@click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
+def main(output, input, timeout):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
@@ -60,13 +62,16 @@ def main(output, input):
     # Use multiprocessing Pool to run slitherin in parallel
     logger.info("starting pool on %d cores", os.cpu_count())
     detector_statistics = Counter()
+    start_time = time.time()
     with Pool() as pool:
         for _, detector_results in pool.imap(process_file, get_contracts(input)):
             detector_statistics['total'] += 1
             for detector, found in detector_results.items():
                 if found:
                     detector_statistics[detector] += 1
-
+            if timeout is not None and time.time() - start_time > timeout:
+                logger.info("timeout stop, processed %d tasks", detector_statistics['total'])
+                break
     # Aggregate statistics for each detector
     """logger.info("Aggregate detector stats")
     #detector_statistics = Counter()
