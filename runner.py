@@ -69,7 +69,7 @@ def main(output, input, timeout):
     detector_statistics = Counter()
     start_time = time.time()
     with Pool() as pool:
-        for _, detector_results in pool.imap(process_file, get_contracts(input,20)):
+        for _, detector_results in pool.imap(process_file, get_contracts(input)):
             detector_statistics['total'] += 1
             for detector, found in detector_results.items():
                 if found:
