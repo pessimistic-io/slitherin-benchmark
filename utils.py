@@ -1,5 +1,11 @@
+import re
 import ast
 import os
+import json
+
+from collections import namedtuple
+
+SOLC_DIR = "solc-bin"
 
 class AbstractDetector:
     pass  # Your AbstractDetector class definition here
@@ -38,18 +44,48 @@ def extract_detectors(folder_path):
 
     return list(argument_values)
 
-def get_contracts(dir_name, limit = None):
+def get_solc_path(comp_ver):
+    if comp_ver == None:
+        return None
+    if comp_ver[0] == 'v':
+        comp_ver = comp_ver[1:]
+    solc_ver = comp_ver
+    if "-" in solc_ver:
+        solc_ver = solc_ver.split("-")[0]
+
+    solc_files = os.listdir(SOLC_DIR)
+    
+    for file in solc_files:
+        file_ver = file.split("+")[0][len(f"solc-linux-amd64-v"):]
+        if file_ver == solc_ver:
+            return os.path.join(SOLC_DIR, file)
+    return None
+
+def get_address(filename):
+    m = re.match("^([0-9a-zA-Z]{40})_.*\.sol$", filename)
+    if m:
+        return "0x"+m.group(1)
+
+Contract = namedtuple('Contract', 'filename,compiler')
+
+def get_contracts(dir_name, limit = None, solc_ver = None):
     i = 0
+    if solc_ver is None:
+        solc_ver = {}
+        with open(os.path.join(dir_name, "contracts.json")) as f:
+            for line in f:
+                contract_info = json.loads(line)
+                solc_ver[contract_info["address"]] = contract_info["compiler"]
     for file in os.listdir(dir_name):
         if limit is not None and i>=limit:
             break
         if os.path.isdir(os.path.join(dir_name,file)):
-            for contract in get_contracts(os.path.join(dir_name, file), None if limit is None else limit - i):
+            for contract in get_contracts(os.path.join(dir_name, file), None if limit is None else limit - i, solc_ver):
                 i += 1
                 yield contract
         elif file.endswith(".sol"):
             i += 1
-            yield os.path.join(dir_name, file)
+            yield Contract(os.path.join(dir_name, file), get_solc_path(solc_ver.get(get_address(file))))
 
 if __name__ == "__main__":
     folder_path = os.path.join("..", "detectors")

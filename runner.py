@@ -7,8 +7,9 @@ from multiprocessing import Pool
 from collections import Counter
 import pandas as pd
 import click
+from datetime import timedelta
 
-from utils import extract_detectors, get_contracts
+from utils import extract_detectors, get_contracts, Contract
 DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
 
 def slitherAnalyzer(output):
@@ -25,13 +26,17 @@ def slitherAnalyzer(output):
         return {'error': True}
     return result
 
-def process_file(filename):
+def process_file(contract: Contract):
     try:
         # Run slitherin command and capture output
         # slitherin --pess tests/multiple_storage_read_test.sol --json -
         logger = logging.getLogger()
-        logger.debug("slitherin --pess %s --json -", filename)
-        result = subprocess.run(['slitherin', '--pess', filename, '--json', '-'], capture_output=True, text=True, check=True, encoding="utf8")
+        command = ['slitherin', '--pess', contract.filename, '--json', '-']
+        logger.debug(" ".join(command))
+        if contract.compiler is not None:
+            command.append("--solc")
+            command.append(contract.compiler)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
         
         # Process the output using slitherAnalyzer function
         try:
@@ -39,13 +44,13 @@ def process_file(filename):
             detector_results = slitherAnalyzer(slitherin_out)
         except Exception as e:
             logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d out=_%s_", filename, result.stdout, len(result.stdout), len(slitherin_out), result.stdout)
-            return filename, {"failed": True}
+            return contract.filename, {"failed": True}
         # Return filename and detector results
-        return filename, detector_results
+        return contract.filename, detector_results
     except subprocess.CalledProcessError as e:
         # Handle any errors that occur during slitherin execution
-        logger.exception("CalledProcessError %s", filename)
-        return filename, {}
+        logger.error("%s returned %s: %s", e.returncode, contract.filename, e.output)
+        return contract.filename, {'error': True}
 
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
@@ -72,15 +77,7 @@ def main(output, input, timeout):
             if timeout is not None and time.time() - start_time > timeout:
                 logger.info("timeout stop, processed %d tasks", detector_statistics['total'])
                 break
-    # Aggregate statistics for each detector
-    """logger.info("Aggregate detector stats")
-    #detector_statistics = Counter()
-    for _, detector_results in results:
-        detector_statistics['total'] += 1    
-        for detector, found in detector_results.items():
-            if found:
-                detector_statistics[detector] += 1
-    """
+    logger.info("completed pool in %s", str(timedelta(seconds=round(time.time()-start_time))))
     df = pd.DataFrame.from_dict(detector_statistics, orient='index')
     print(df.to_markdown())
     if output is not None:
