@@ -54,10 +54,8 @@ def get_solc_path(comp_ver):
         solc_ver = solc_ver.split("-")[0]
 
     solc_files = os.listdir(SOLC_DIR)
-    
     for file in solc_files:
-        file_ver = file.split("+")[0][len(f"solc-linux-amd64-v"):]
-        if file_ver == solc_ver:
+        if file.startswith(f"v{solc_ver}"):
             return os.path.join(SOLC_DIR, file)
     return None
 
@@ -70,22 +68,13 @@ Contract = namedtuple('Contract', 'filename,compiler')
 
 def get_contracts(dir_name, limit = None, solc_ver = None):
     i = 0
-    if solc_ver is None:
-        solc_ver = {}
-        with open(os.path.join(dir_name, "contracts.json")) as f:
-            for line in f:
-                contract_info = json.loads(line)
-                solc_ver[contract_info["address"]] = contract_info["compiler"]
-    for file in os.listdir(dir_name):
-        if limit is not None and i>=limit:
-            break
-        if os.path.isdir(os.path.join(dir_name,file)):
-            for contract in get_contracts(os.path.join(dir_name, file), None if limit is None else limit - i, solc_ver):
-                i += 1
-                yield contract
-        elif file.endswith(".sol"):
+    with open(os.path.join(dir_name, "contracts.json")) as f:
+        for line in f:
+            if limit is not None and i>=limit:
+                return
+            contract_info = json.loads(line)
             i += 1
-            yield Contract(os.path.join(dir_name, file), get_solc_path(solc_ver.get(get_address(file))))
+            yield Contract(os.path.join(dir_name, contract_info["address"][2:4], contract_info["address"][2:]), os.path.join(SOLC_DIR, contract_info["compiler"]))
 
 if __name__ == "__main__":
     folder_path = os.path.join("..", "detectors")
