@@ -1,0 +1,42 @@
+name: Run Benchmark
+
+on:
+    pull_request:
+        branches:
+            - 'master'
+            - 'develop'
+    push:
+      branches:
+        - 'bench_params'
+jobs:
+    RunBenchmark: 
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                ref: 'bench_params'
+            - name: Set up Python
+              uses: actions/setup-python@v4
+              with:
+                python-version: '3.x'
+            - name: Set up Node
+              uses: actions/setup-node@v4
+              with:
+                node-version: '18.x'
+            - name: Update pip
+              run: python -m pip install --upgrade pip
+            - name: Install solc-select
+              run: python -m pip install solc-select
+            - name: Install Slither
+              run: python -m pip install slither-analyzer
+            - name: Install Setuptools
+              run: python -m pip install setuptools
+            - name: Install Slitherin
+              run: python -m pip install slitherin
+            - name: Install node dependencies
+              run: npm ci
+            - name: Install benchmark requirements
+              run: python -m pip install -r requirements.txt
+            - name: Run Benchmark
+              run: python3 runner.py -i contracts/mainnet -p 8
