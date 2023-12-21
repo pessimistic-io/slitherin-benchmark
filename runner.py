@@ -63,7 +63,8 @@ def process_file(contract: Contract, detectors: list = None):
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-d', '--detect', help="Comma-separated list of detectors, defaults to slitherin detectors: %s" % ','.join(DETECTORS), default=None, type=str)
-def main(output, input, timeout, limit, detect):
+@click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=None, type=int)
+def main(output, input, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
@@ -72,7 +73,7 @@ def main(output, input, timeout, limit, detect):
     logger.addHandler(handler)
     
     # Use multiprocessing Pool to run slitherin in parallel
-    logger.info("starting pool on %d cores", os.cpu_count())
+    logger.info("starting pool on %d cores", pool if pool is not None else os.cpu_count())
     detector_statistics = Counter()
     start_time = time.time()
     with Pool() as pool:
