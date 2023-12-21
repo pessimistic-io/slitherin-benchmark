@@ -57,12 +57,13 @@ def process_file(contract: Contract, detectors: list = None):
         logger.error("%s returned %s: %s", e.returncode, contract.filename, e.output)
         return contract.filename, {'error': True}
 
+
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
 @click.option('-i', '--input', help="directory with contracts")
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
-@click.option('-d', '--detect', help="Comma-separated list of detectors, defaults to slitherin detectors: %s" % ','.join(DETECTORS), default=None, type=str)
+@click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(d[1] for d in DETECTORS), default=None, type=str)
 @click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=None, type=int)
 def main(output, input, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
