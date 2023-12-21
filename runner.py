@@ -74,10 +74,11 @@ def main(output, input, timeout, limit, detect, pool):
     logger.addHandler(handler)
     
     # Use multiprocessing Pool to run slitherin in parallel
-    logger.info("starting pool on %d cores", pool if pool is not None else os.cpu_count())
+    pool_number = pool if pool is not None else os.cpu_count()
+    logger.info("starting pool on %d cores", pool_number)
     detector_statistics = Counter()
     start_time = time.time()
-    with Pool() as pool:
+    with Pool(pool_number) as pool:
         for _, detector_results in pool.imap(partial(process_file, detectors=detect), get_contracts(input)):
             detector_statistics['total'] += 1
             for detector, found in detector_results.items():
