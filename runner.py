@@ -13,15 +13,22 @@ from functools import partial
 from utils import extract_detectors, get_contracts, Contract
 DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
 
-def slitherAnalyzer(output):
+def slitherAnalyzer(output:str) -> dict:
     # Return a dictionary with detector names as keys and True/False as values
+    """Analyze slither json output.
+    Args:
+        output: slither output in json mode.
+    Returns:
+        dict with keys detectors names and values (filename, lines).
+    """
     result = {}
     if len(output)<6:
         return {'empty output': True}
     output = json.loads(output, strict=False)
         
     if output['success'] and 'results' in output and 'detectors' in output['results']:
-        for detector_result in output['results']['detectors']:          
+        for detector_result in output['results']['detectors']:
+            #print(json.dumps(detector_result))     
             result[detector_result['check']] = True
     else:
         return {'error': True}
@@ -64,21 +71,20 @@ def process_file(contract: Contract, detectors: list = None):
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(d[1] for d in DETECTORS), default=None, type=str)
-@click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=None, type=int)
+@click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=os.cpu_count(), type=int)
 def main(output, input, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     logger.addHandler(handler)
     
     # Use multiprocessing Pool to run slitherin in parallel
-    pool_number = pool if pool is not None else os.cpu_count()
-    logger.info("starting pool on %d cores", pool_number)
+    logger.info("starting pool on %d cores", pool)
     detector_statistics = Counter()
     start_time = time.time()
-    with Pool(pool_number) as pool:
+    with Pool(pool) as pool:
         for _, detector_results in pool.imap(partial(process_file, detectors=detect), get_contracts(input)):
             detector_statistics['total'] += 1
             for detector, found in detector_results.items():
