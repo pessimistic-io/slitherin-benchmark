@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.17;
+
+import "./Structs.sol";
+import "./SafeERC20.sol";
+import "./LibPlexusUtil.sol";
+import "./LibData.sol";
+import "./Signers.sol";
+import "./VerifySigEIP712.sol";
+
+contract SwapFacet is Signers, VerifySigEIP712 {
+    using SafeERC20 for IERC20;
+
+    function addDex(address[] calldata _dex) public {
+        require(msg.sender == LibDiamond.contractOwner());
+        Dex storage s = LibPlexusUtil.getSwapStorage();
+
+        uint256 len = _dex.length;
+
+        for (uint256 i; i < len; ) {
+            if (_dex[i] == address(0)) {
+                revert();
+            }
+            s.allowedDex[_dex[i]] = true;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function removeDex(address[] calldata _dex) public {
+        require(msg.sender == LibDiamond.contractOwner());
+        Dex storage s = LibPlexusUtil.getSwapStorage();
+
+        uint256 len = _dex.length;
+
+        for (uint256 i; i < len; ) {
+            if (_dex[i] == address(0)) {
+                revert();
+            }
+            s.allowedDex[_dex[i]] = false;
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function swapRouter(SwapData calldata _swap) external payable {
+        LibPlexusUtil._tokenDepositAndUserSwap(_swap);
+    }
+
+    function viewSigner(uint256 index) external view returns (address) {
+        SigData storage s = sigDataStorage();
+        return s.signerList[index];
+    }
+
+    function setSigner(address[] memory _signer) public {
+        SigData storage s = sigDataStorage();
+        require(msg.sender == LibDiamond.contractOwner());
+        for (uint256 i = 0; i < _signer.length; i++) {
+            s.signerList.push(_signer[i]);
+        }
+    }
+
+    function relaySwapRouter(SwapData calldata _swap, Input calldata _sigCollect, bytes[] calldata signature) external {
+        address owner = LibDiamond.contractOwner();
+        require(msg.sender == owner);
+        require(
+            _sigCollect.userAddress == _swap.user &&
+                _sigCollect.amount - _sigCollect.gasFee == _swap.amount &&
+                _sigCollect.toTokenAddress == _swap.dstToken
+        );
+        relaySig(_sigCollect, signature);
+
+        bool isNotNative = !LibPlexusUtil._isNative(_sigCollect.fromTokenAddress);
+        uint256 fromAmount = _sigCollect.amount - _sigCollect.gasFee;
+        if (isNotNative) {
+            IERC20(_sigCollect.fromTokenAddress).safeApprove(_swap.swapRouter, fromAmount);
+            if (_sigCollect.gasFee > 0) IERC20(_sigCollect.fromTokenAddress).safeTransfer(owner, _sigCollect.gasFee);
+        } else {
+            if (_sigCollect.gasFee > 0) LibPlexusUtil._safeNativeTransfer(owner, _sigCollect.gasFee);
+        }
+        uint256 dstAmount = LibPlexusUtil._userSwapStart(_swap);
+        emit LibData.Relayswap(_sigCollect.userAddress, _sigCollect.toTokenAddress, dstAmount);
+    }
+}
+

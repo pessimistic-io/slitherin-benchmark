@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GNU GPLv3
+pragma solidity ^0.8.4;
+
+import "./AccessControl.sol";
+import "./IERC20.sol";
+import "./ReentrancyGuard.sol";
+
+
+interface Marinate {
+    function addReward(address token, uint256 amount) external;
+}
+
+contract MarinateReceiver is AccessControl, ReentrancyGuard {
+  Marinate public marinateContract;
+  address[] public distributedTokens;
+  mapping(address => bool) public isDistributedToken;
+  bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+
+  constructor(address _marinate) {
+    marinateContract = Marinate(_marinate);
+    _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+  }
+
+  event RewardAdded(address token, uint256 amount);
+
+  function sendBalancesAsRewards() external onlyAdmin nonReentrant {
+    for (uint256 i = 0; i < distributedTokens.length; i++) {
+      address token = distributedTokens[i];
+      uint256 tokenBalance = IERC20(token).balanceOf(address(this));
+      if (tokenBalance == 0) { continue; }
+      require(IERC20(token).approve(address(marinateContract), tokenBalance), "Approve failed");
+      marinateContract.addReward(token, tokenBalance);
+      emit RewardAdded(token, tokenBalance);
+    }
+  }
+
+  function addDistributedToken(address token) external onlyAdmin {
+    isDistributedToken[token] = true;
+    distributedTokens.push(token);
+  }
+
+  function removeDistributedToken(address token) external onlyAdmin {
+    for (uint256 i = 0; i < distributedTokens.length; i++) {
+      if (distributedTokens[i] == token) {
+        distributedTokens[i] = distributedTokens[distributedTokens.length - 1];
+        distributedTokens.pop();
+        isDistributedToken[token] = false;
+      }
+    }
+  }
+
+  function setMarinateAddress(address st) external onlyAdmin {
+    marinateContract = Marinate(st);
+  }
+
+  function recoverEth() external onlyAdmin {
+    (bool success, ) = msg.sender.call{value: address(this).balance}("");
+    require(success, "Withdraw failed");
+  }
+
+  modifier onlyAdmin() {
+    require(hasRole(ADMIN_ROLE, msg.sender), "Caller is not an admin");
+    _;
+  }
+}

@@ -1,0 +1,23 @@
+pragma solidity >=0.8.19;
+
+import "./IERC165.sol";
+
+library ERC165Helper {
+    function safeSupportsInterface(address candidate, bytes4 interfaceID) internal returns (bool supportsInterface) {
+        (bool success, bytes memory response) =
+            candidate.call(abi.encodeWithSelector(IERC165.supportsInterface.selector, interfaceID));
+
+        if (!success) {
+            return false;
+        }
+
+        if (response.length == 0) {
+            return false;
+        }
+
+        assembly {
+            supportsInterface := mload(add(response, 32))
+        }
+    }
+}
+

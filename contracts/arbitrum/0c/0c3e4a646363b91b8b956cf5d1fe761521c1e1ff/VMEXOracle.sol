@@ -1,0 +1,512 @@
+// SPDX-License-Identifier: agpl-3.0
+pragma solidity 0.8.19;
+
+import {IERC20} from "./IERC20.sol";
+import {ILendingPoolAddressesProvider} from "./ILendingPoolAddressesProvider.sol";
+import {ICurvePool} from "./ICurvePool.sol";
+import {IPriceOracleGetter} from "./IPriceOracleGetter.sol";
+import {IChainlinkPriceFeed} from "./IChainlinkPriceFeed.sol";
+import {IChainlinkAggregator} from "./IChainlinkAggregator.sol";
+import {SafeERC20} from "./SafeERC20.sol";
+import {IERC20Detailed} from "./IERC20Detailed.sol";
+import {Initializable} from "./Initializable.sol";
+import {IAssetMappings} from "./IAssetMappings.sol";
+import {DataTypes} from "./DataTypes.sol";
+import {CurveOracle} from "./CurveOracle.sol";
+import {IYearnToken} from "./IYearnToken.sol";
+import {Address} from "./contracts_Address.sol";
+import {Errors} from "./Errors.sol";
+import {Helpers} from "./Helpers.sol";
+import {AggregatorV3Interface} from "./AggregatorV3Interface.sol";
+import {IBeefyVault} from "./IBeefyVault.sol";
+import {IVeloPair} from "./IVeloPair.sol";
+import {IBalancer} from "./IBalancer.sol";
+import {IVault} from "./IVault.sol";
+import {VelodromeOracle} from "./VelodromeOracle.sol";
+import {BalancerOracle} from "./BalancerOracle.sol";
+import {IRocketPriceOracle} from "./IRocketPriceOracle.sol";
+import {ICamelotPair} from "./ICamelotPair.sol";
+
+/// @title VMEXOracle
+/// @author VMEX, with inspiration from Aave
+/// @notice Proxy smart contract to get the price of an asset from a price source, with Chainlink Aggregator
+///         smart contracts as primary option
+/// - If the returned price by a Chainlink aggregator is <= 0, the call is forwarded to a fallbackOracle
+/// - Owned by the VMEX governance system, allowed to add sources for assets, replace them
+///   and change the fallbackOracle
+contract VMEXOracle is Initializable, IPriceOracleGetter {
+    using SafeERC20 for IERC20;
+
+    struct ChainlinkData {
+        IChainlinkPriceFeed feed;
+        uint64 heartbeat;
+    }
+
+    ILendingPoolAddressesProvider internal _addressProvider;
+    IAssetMappings internal _assetMappings;
+    IPriceOracleGetter private _fallbackOracle;
+    IRocketPriceOracle public rETHOracle;
+    mapping(address => ChainlinkData) private _assetsSources;
+    mapping(uint256 => AggregatorV3Interface) public sequencerUptimeFeeds;
+
+    address public BASE_CURRENCY; //removed immutable keyword since
+    uint256 public BASE_CURRENCY_DECIMALS; //amount of decimals that the chainlink aggregator assumes for price feeds with this currency as the base
+    uint256 public BASE_CURRENCY_UNIT;
+    string public BASE_CURRENCY_STRING;
+
+    address public constant ETH_NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+    address public WETH;
+    uint256 private constant GRACE_PERIOD_TIME = 1 hours;
+
+    modifier onlyGlobalAdmin() {
+        //global admin will be able to have access to other tranches, also can set portion of reserve taken as fee for VMEX admin
+        _onlyGlobalAdmin();
+        _;
+    }
+
+    function _onlyGlobalAdmin() internal view {
+        //this contract handles the updates to the configuration
+        require(
+            _addressProvider.getGlobalAdmin() == msg.sender,
+            Errors.CALLER_NOT_GLOBAL_ADMIN
+        );
+    }
+
+    function initialize (
+        ILendingPoolAddressesProvider provider
+    ) public initializer {
+        _addressProvider = provider;
+        _assetMappings = IAssetMappings(_addressProvider.getAssetMappings());
+    }
+
+    /**
+     * @dev Sets the base currency that all other assets are priced based on. Can only be set once
+     * @param baseCurrency The address of the base currency
+     * @param baseCurrencyDecimals amount of decimals that the chainlink aggregator assumes for price feeds with this currency as the base
+     * @param baseCurrencyUnit What price the base currency is. Usually this is just 10 ** how many decimals the base currency has
+     * @param baseCurrencyString "ETH" or "USD" for purposes of checking correct denomination
+     **/
+    function setBaseCurrency(
+        address baseCurrency,
+        uint256 baseCurrencyDecimals,
+        uint256 baseCurrencyUnit,
+        string calldata baseCurrencyString
+    ) external onlyGlobalAdmin {
+        require(BASE_CURRENCY == address(0), Errors.VO_BASE_CURRENCY_SET_ONLY_ONCE);
+        BASE_CURRENCY = baseCurrency;
+        BASE_CURRENCY_DECIMALS = baseCurrencyDecimals;
+        BASE_CURRENCY_UNIT = baseCurrencyUnit;
+        BASE_CURRENCY_STRING = baseCurrencyString;
+    }
+
+    /**
+     * @dev External function called by the VMEX governance to set or replace sources of assets
+     * @param assets The addresses of the assets
+     * @param sources The address of the source of each asset
+     * @param checkDenomination true if the description of the chainlink price feed should be checked, false for exceptions
+     **/
+    function setAssetSources(
+        address[] calldata assets,
+        ChainlinkData[] calldata sources,
+        bool checkDenomination
+    ) external onlyGlobalAdmin {
+        require(assets.length == sources.length, Errors.ARRAY_LENGTH_MISMATCH);
+        uint256 assetsLength = assets.length;
+        for (uint256 i; i < assetsLength; ++i) {
+            require(!checkDenomination || Helpers.compareSuffix(IChainlinkPriceFeed(sources[i].feed).description(), BASE_CURRENCY_STRING), Errors.VO_BAD_DENOMINATION);
+            require(IChainlinkPriceFeed(sources[i].feed).decimals() == BASE_CURRENCY_DECIMALS, Errors.VO_BAD_DECIMALS);
+            _assetsSources[assets[i]] = sources[i];
+            emit AssetSourceUpdated(assets[i], address(sources[i].feed));
+        }
+    }
+
+    /**
+     * @dev Sets the fallback oracle. Callable only by the VMEX governance
+     * @param fallbackOracle The address of the fallbackOracle
+     **/
+    function setFallbackOracle(address fallbackOracle) external onlyGlobalAdmin {
+        _fallbackOracle = IPriceOracleGetter(fallbackOracle);
+        emit FallbackOracleUpdated(fallbackOracle);
+    }
+
+    function setWETH(
+        address weth
+    ) external onlyGlobalAdmin {
+        require(WETH == address(0), Errors.VO_WETH_SET_ONLY_ONCE);
+        WETH = weth;
+    }
+
+    function setRETHOracle(
+        address _rETHOracle
+    ) external onlyGlobalAdmin {
+        rETHOracle = IRocketPriceOracle(_rETHOracle);
+    }
+
+    /**
+     * @dev Sets the sequencerUptimeFeed. Callable only by the VMEX governance
+     * @param sequencerUptimeFeed The address of the sequencerUptimeFeed
+     **/
+    function setSequencerUptimeFeed(uint256 chainId, address sequencerUptimeFeed) external onlyGlobalAdmin {
+        sequencerUptimeFeeds[chainId] = AggregatorV3Interface(sequencerUptimeFeed);
+        emit SequencerUptimeFeedUpdated(chainId, sequencerUptimeFeed);
+    }
+
+    /**
+     * @dev Checks if sequencer is up. If not, reverts. If sequencer came back online, need to wait for the grace period before resuming
+     **/
+    function checkSequencerUp() internal view {
+        AggregatorV3Interface seqUpFeed = sequencerUptimeFeeds[block.chainid];
+
+        if(address(seqUpFeed)!=address(0)) {
+            // prettier-ignore
+            (
+                /*uint80 roundID*/,
+                int256 answer,
+                uint256 startedAt,
+                /*uint256 updatedAt*/,
+                /*uint80 answeredInRound*/
+            ) = seqUpFeed.latestRoundData();
+
+            // Answer == 0: Sequencer is up
+            // Answer == 1: Sequencer is down
+            bool isSequencerUp = answer == 0;
+            require(isSequencerUp, Errors.VO_SEQUENCER_DOWN);
+
+            // Make sure the grace period has passed after the sequencer is back up.
+            uint256 timeSinceUp = block.timestamp - startedAt;
+
+            require(timeSinceUp > GRACE_PERIOD_TIME, Errors.VO_SEQUENCER_GRACE_PERIOD_NOT_OVER);
+        }
+    }
+
+    /**
+     * @dev Gets an asset price by address. 
+     * Note the result should always have 18 decimals if using ETH as base. If using USD as base, there will be 8 decimals
+     * @param asset The asset address
+     **/
+    function getAssetPrice(address asset)
+        public
+        override
+        returns (uint256)
+    {
+        if (asset == BASE_CURRENCY) {
+            return BASE_CURRENCY_UNIT;
+        }
+
+        checkSequencerUp();
+
+        DataTypes.ReserveAssetType tmp = _assetMappings.getAssetType(asset);
+
+        if(tmp==DataTypes.ReserveAssetType.CHAINLINK){
+            return getChainlinkAssetPrice(asset);
+        }
+        else if(tmp==DataTypes.ReserveAssetType.CURVE || tmp==DataTypes.ReserveAssetType.CURVEV2){
+            return getCurveAssetPrice(asset, tmp);
+        }
+        else if(tmp==DataTypes.ReserveAssetType.YEARN){
+            return getYearnPrice(asset);
+        }
+        else if(tmp==DataTypes.ReserveAssetType.BEEFY) {
+            return getBeefyPrice(asset);
+        }
+        else if(tmp==DataTypes.ReserveAssetType.VELODROME) {
+            return getVeloPrice(asset);
+        }
+        else if(tmp == DataTypes.ReserveAssetType.BEETHOVEN) {
+            return getBeethovenPrice(asset);
+        }
+        else if (tmp == DataTypes.ReserveAssetType.RETH) {
+            return getRETHPrice(asset);
+        }
+        else if (tmp == DataTypes.ReserveAssetType.CL_PRICE_ADAPTER) {
+            return getCLPriceAdapterPrice(asset);
+        }
+        else if (tmp == DataTypes.ReserveAssetType.CAMELOT) {
+            return getCamelotPrice(asset);
+        }
+        else if (tmp == DataTypes.ReserveAssetType.BACKED) {
+            return getBackedAssetPrice(asset);
+        }
+        revert(Errors.VO_ORACLE_ADDRESS_NOT_FOUND);
+    }
+
+    /**
+     * @dev Gets an asset price for an asset with a chainlink aggregator
+     * @param asset The asset address
+     **/
+    function getChainlinkAssetPrice(address asset) internal returns (uint256){
+        IChainlinkPriceFeed source = _assetsSources[asset].feed;
+        if (address(source) == address(0)) {
+            return _fallbackOracle.getAssetPrice(asset);
+        } else {
+            try IChainlinkPriceFeed(source).latestRoundData() returns (
+                uint80,
+                int256 price,
+                uint,
+                uint256 updatedAt,
+                uint80
+            ) {
+                IChainlinkAggregator aggregator = IChainlinkAggregator(IChainlinkPriceFeed(source).aggregator());
+                if (price > int256(aggregator.minAnswer()) && 
+                    price < int256(aggregator.maxAnswer()) && 
+                    block.timestamp - updatedAt < _assetsSources[asset].heartbeat
+                ) {
+                    return uint256(price);
+                } else {
+                    return _fallbackOracle.getAssetPrice(asset);
+                }
+            } catch {
+                return _fallbackOracle.getAssetPrice(asset);
+            }
+        }
+    }
+
+    /**
+     * @dev Gets an asset price for an asset with a chainlink aggregator but in the wrong units. Uses Aave's adapter: https://basescan.org/address/0x80f2c02224a2e548fc67c0bf705ebfa825dd5439#code
+     * @param asset The asset address
+     **/
+    function getCLPriceAdapterPrice(address asset) internal returns (uint256){
+        IChainlinkPriceFeed source = _assetsSources[asset].feed;
+        if (address(source) == address(0)) {
+            return _fallbackOracle.getAssetPrice(asset);
+        } else {
+            try IChainlinkPriceFeed(source).latestAnswer() returns (
+                int256 price
+            ) {
+                if (price > 0) {
+                    return uint256(price);
+                } else {
+                    return _fallbackOracle.getAssetPrice(asset);
+                }
+            } catch {
+                return _fallbackOracle.getAssetPrice(asset);
+            }
+        }
+    }
+
+    /**
+     * @dev Gets an asset price for an asset with a chainlink aggregator
+     * @param asset The asset address
+     **/
+    function getBackedAssetPrice(address asset) internal returns (uint256){
+        IChainlinkPriceFeed source = _assetsSources[asset].feed;
+        if (address(source) == address(0)) {
+            return _fallbackOracle.getAssetPrice(asset);
+        } else {
+            try IChainlinkPriceFeed(source).latestRoundData() returns (
+                uint80,
+                int256 price,
+                uint,
+                uint256 updatedAt,
+                uint80
+            ) {
+                if (block.timestamp - updatedAt < _assetsSources[asset].heartbeat) {
+                    return uint256(price);
+                } else {
+                    return _fallbackOracle.getAssetPrice(asset);
+                }
+            } catch {
+                return _fallbackOracle.getAssetPrice(asset);
+            }
+        }
+    }
+
+    /**
+     * @dev Gets an asset price for an asset with a chainlink aggregator
+     * @param asset The asset address
+     **/
+    function getCurveAssetPrice(
+        address asset,
+        DataTypes.ReserveAssetType assetType
+    ) internal returns (uint256 price) {
+        DataTypes.CurveMetadata memory c = _assetMappings.getCurveMetadata(asset);
+
+        if (!Address.isContract(c._curvePool)) {
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+
+        uint256 poolSize = c._poolSize;
+
+        uint256[] memory prices = new uint256[](poolSize);
+
+        for (uint256 i; i < poolSize;) {
+            address underlying = ICurvePool(c._curvePool).coins(i);
+            if(underlying == ETH_NATIVE){
+                underlying = WETH;
+            }
+            prices[i] = getAssetPrice(underlying); //handles case where underlying is curve too.
+            require(prices[i] != 0, Errors.VO_UNDERLYING_FAIL);
+
+            unchecked { ++i; }
+        }
+
+        if(assetType==DataTypes.ReserveAssetType.CURVE){
+            price = CurveOracle.get_price_v1(c._curvePool, prices, c._reentrancyType);
+        }
+        else if(assetType==DataTypes.ReserveAssetType.CURVEV2){
+            price = CurveOracle.get_price_v2(c._curvePool, prices, c._reentrancyType);
+        }
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+        return price;
+    }
+
+    /**
+     * @dev Gets an asset price for a velodrome (or chronos) token
+     * @param asset The asset address
+     **/
+    function getVeloPrice(
+        address asset
+    ) internal returns (uint256 price) {
+        uint256[] memory prices = new uint256[](2);
+
+        (address token0, address token1) = IVeloPair(asset).tokens();
+
+        if(token0 == ETH_NATIVE){
+            token0 = WETH;
+        }
+        prices[0] = getAssetPrice(token0); //handles case where underlying is curve too.
+        require(prices[0] != 0, Errors.VO_UNDERLYING_FAIL);
+
+        if(token1 == ETH_NATIVE){
+            token1 = WETH;
+        }
+        prices[1] = getAssetPrice(token1); //handles case where underlying is curve too.
+        require(prices[1] != 0, Errors.VO_UNDERLYING_FAIL);
+
+        price = VelodromeOracle.get_lp_price(asset, prices, BASE_CURRENCY_DECIMALS); //has 18 decimals
+
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+
+        return price;
+    }
+
+    /**
+     * @dev Gets an asset price for a Camelot token
+     * @param asset The asset address
+     **/
+    function getCamelotPrice(
+        address asset
+    ) internal returns (uint256 price) {
+        uint256[] memory prices = new uint256[](2);
+
+        address token0 = ICamelotPair(asset).token0();
+        address token1 = ICamelotPair(asset).token1();
+
+        token0 = token0 == ETH_NATIVE ? WETH : token0;
+        prices[0] = getAssetPrice(token0); //handles case where underlying is curve too.
+        require(prices[0] != 0, Errors.VO_UNDERLYING_FAIL);
+
+        token1 = token1 == ETH_NATIVE ? WETH : token1;
+        prices[1] = getAssetPrice(token1); //handles case where underlying is curve too.
+        require(prices[1] != 0, Errors.VO_UNDERLYING_FAIL);
+
+        price = VelodromeOracle.get_cmlt_lp_price(asset, prices, BASE_CURRENCY_DECIMALS); //has 18 decimals
+
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+
+        return price;
+    }
+
+    /**
+     * @dev Gets an asset price for a beethoven or balancer token
+     * @param asset The asset address
+     **/
+    function getBeethovenPrice(
+        address asset
+    ) internal returns (uint256) {
+        DataTypes.BeethovenMetadata memory md = _assetMappings.getBeethovenMetadata(asset);
+
+        uint256 price = BalancerOracle.get_lp_price(
+            address(this),
+            asset,
+            md._typeOfPool,
+            md._legacy
+        );
+
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+        return price;
+    }
+
+    /**
+     * @dev Gets an asset price for a yearn token
+     * @param asset The asset address
+     **/
+    function getYearnPrice(address asset) internal returns (uint256){
+        IYearnToken yearnVault = IYearnToken(asset);
+        uint256 underlyingPrice = getAssetPrice(yearnVault.token()); //getAssetPrice() will always have 18 decimals for Aave and Curve tokens (prices in eth), or 8 decimals if prices in USD
+        //note: pricePerShare has decimals equal to underlying tokens (ex: yvUSDC has 6 decimals). By dividing by 10**yearnVault.decimals(), we keep the decimals of underlyingPrice which is 18 decimals for eth base, 8 for usd base.
+        uint256 price = yearnVault.pricePerShare()*underlyingPrice / 10**yearnVault.decimals();
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+        return price;
+    }
+
+    /**
+     * @dev Gets an asset price for a beefy token
+     * @param asset The asset address
+     **/
+	function getBeefyPrice(address asset) internal returns (uint256) {
+        IBeefyVault beefyVault = IBeefyVault(asset);
+        uint256 underlyingPrice = getAssetPrice(beefyVault.want());
+        uint256 price = beefyVault.getPricePerFullShare()*underlyingPrice / 10**beefyVault.decimals();
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+        return price;
+	}
+
+    /**
+     * @dev Gets an asset price for a rETH token
+     * @param asset The asset address
+     **/
+	function getRETHPrice(address asset) internal returns (uint256) {
+        uint256 underlyingPrice = getAssetPrice(WETH);
+        uint256 price = rETHOracle.rate()*underlyingPrice / 10**18;
+        if(price == 0){
+            return _fallbackOracle.getAssetPrice(asset);
+        }
+        return price;
+	}
+
+    /// @notice Gets a list of prices from a list of assets addresses
+    /// @param assets The list of assets addresses
+    function getAssetsPrices(address[] calldata assets)
+        external
+        returns (uint256[] memory)
+    {
+        uint256[] memory prices = new uint256[](assets.length);
+        for (uint256 i; i < assets.length;) {
+            prices[i] = getAssetPrice(assets[i]);
+
+            unchecked { ++i; }
+        }
+        return prices;
+    }
+
+    /// @notice Gets the address of the source for an asset address
+    /// @param asset The address of the asset
+    /// @return address The address of the source
+    function getSourceOfAsset(address asset) external view returns (address) {
+        return address(_assetsSources[asset].feed);
+    }
+
+    /// @notice Gets the address of the fallback oracle
+    /// @return address The addres of the fallback oracle
+    function getFallbackOracle() external view returns (address) {
+        return address(_fallbackOracle);
+    }
+
+    //Just used for calling curve remove liquidity. Without this, remove_liquidity cannot find function selector receive()
+    receive() external payable {
+	}
+}
+

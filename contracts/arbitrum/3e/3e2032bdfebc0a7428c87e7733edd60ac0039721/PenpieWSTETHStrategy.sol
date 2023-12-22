@@ -1,0 +1,423 @@
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+import { ReentrancyGuardUpgradeable } from "./ReentrancyGuardUpgradeable.sol";
+import { IStrategy } from "./IStrategy.sol";
+import { IPendleMarket, IPendleRouter } from "./IPendle.sol";
+import { IPenpieDepositorHelper } from "./IPenpieDepositorHelper.sol";
+import { IMasterPenpie } from "./IMasterPenpie.sol";
+import { StratManager } from "./StratManager.sol";
+import { IERC20 } from "./IERC20.sol";
+import { ICamelot } from "./ICamelot.sol";
+import { SafeERC20 } from "./SafeERC20.sol";
+import { SafeMath } from "./SafeMath.sol";
+import { UUPSUpgradeable } from "./UUPSUpgradeable.sol";
+import { ISwapRouter } from "./ISwapRouter.sol";
+import { TransferHelper } from "./TransferHelper.sol";
+import { IVault, IAsset } from "./IBalancer.sol";
+
+/**
+ * @title PenpieWSTETHStrategy
+ * @notice This contract is a strategy that interacts with the Pendle protocol.
+ *
+ */
+contract PenpieWSTETHStrategy is IStrategy, StratManager, ReentrancyGuardUpgradeable, UUPSUpgradeable {
+    using SafeERC20 for IERC20;
+    using SafeMath for uint256;
+
+    IERC20 private _vault;
+    IERC20 private _asset;
+
+    uint256 public lastHarvest;
+    bool public harvestOnDeposit;
+
+    address public constant weth = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    address public constant wsteth = 0x5979D7b546E38E414F7E9822514be443A4800529;
+    bytes32 public constant wstethpool = 0x36bf227d6bac96e2ab1ebb5492ecec69c691943f000200000000000000000316;
+
+    // Events
+    event Deposit(uint256 tvl);
+    event DepositPendle(uint256 tvl);
+    event Withdraw(uint256 tvl);
+    event StrategyHarvested(address indexed harvester, uint256 wantHarvested);
+    event ChargedFees(uint256 callFees, uint256 factorFees, uint256 strategistFees);
+    event DepositFeeCharge(uint256 amount);
+
+    struct PendleInitParams {
+        address pendleToken;
+        address pendleRouter;
+        address pendlePTToken;
+        address balancerVault;
+        address penpieDepositorHelper;
+        address penpiePendleStaking;
+        address penpieToken;
+        address penpieSwapRouter;
+        address masterPenpie;
+    }
+
+    address public pendleToken;
+    address public pendleRouter;
+    address public pendlePTToken;
+    address public penpieDepositorHelper;
+    address public penpiePendleStaking;
+    address public penpieToken;
+    address public penpieSwapRouter;
+    address public masterPenpie;
+
+    IVault public balancerVault;
+
+    /**
+     * @notice Initialize the contract with initial values.
+     * @param _vaultAddress The address of the vault.
+     * @param _assetAddress The address of the asset.
+     * @param stratParams Parameters related to strategy fees.
+     * @param pendleInitParams Parameters related to pendle params.
+     */
+    function initialize(
+        address _vaultAddress,
+        address _assetAddress,
+        StratFeeManagerParams calldata stratParams,
+        PendleInitParams calldata pendleInitParams
+    ) public initializer {
+        require(_vaultAddress != address(0), 'Invalid vault address');
+        require(_assetAddress != address(0), 'Invalid asset address');
+        require(pendleInitParams.pendleToken != address(0), 'Invalid pendleToken address');
+        require(pendleInitParams.balancerVault != address(0), 'Invalid balancerVault address');
+        require(pendleInitParams.pendleRouter != address(0), 'Invalid pendleRouter address');
+        require(pendleInitParams.pendlePTToken != address(0), 'Invalid pendlePTToken address');
+        __StratFeeManager_init(stratParams);
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+        _vault = IERC20(_vaultAddress);
+        _asset = IERC20(_assetAddress);
+        pendleToken = pendleInitParams.pendleToken;
+        balancerVault = IVault(pendleInitParams.balancerVault);
+        pendleRouter = pendleInitParams.pendleRouter;
+        pendlePTToken = pendleInitParams.pendlePTToken;
+        penpieDepositorHelper = pendleInitParams.penpieDepositorHelper;
+        penpiePendleStaking = pendleInitParams.penpiePendleStaking;
+        penpieToken = pendleInitParams.penpieToken;
+        penpieSwapRouter = pendleInitParams.penpieSwapRouter;
+        masterPenpie = pendleInitParams.masterPenpie;
+        _giveAllowances();
+    }
+
+    /**
+     * @notice Returns the address of the asset being farmed.
+     * @return The address of the asset (token).
+     */
+    function asset() external view returns (address) {
+        return address(_asset);
+    }
+
+    /**
+     * @notice Returns the address of the vault contract.
+     * @return The address of the vault contract.
+     */
+    function vault() external view returns (address) {
+        return address(_vault);
+    }
+
+    /**
+     * @notice Returns the balance of the asset held by the contract.
+     * @return The balance of the asset.
+     */
+    function balanceOf() external view returns (uint256) {
+        uint256 balancePool = IPenpieDepositorHelper(penpieDepositorHelper).balance(address(_asset), address(this));
+        return _asset.balanceOf(address(this)) + balancePool;
+    }
+
+    /**
+     * @notice Performs the harvest operation before a deposit is made.
+     */
+    function beforeDeposit() external {
+        require(msg.sender == address(_vault), '!vault');
+        if (harvestOnDeposit) {
+            _harvest(tx.origin);
+        }
+        beforeDepositBalance = _asset.balanceOf(address(this));
+    }
+
+    /**
+     * @notice Function to manage deposit operation
+     */
+    function deposited() external nonReentrant whenNotPaused {
+        require(msg.sender == address(_vault), '!vault');
+        afterDepositBalance = _asset.balanceOf(address(this));
+        depositFeeCharge();
+        IPenpieDepositorHelper(penpieDepositorHelper).depositMarket(address(_asset), this.balanceOf());
+        emit Deposit(this.balanceOf());
+    }
+
+    function depositFeeCharge() internal {
+        uint256 amount = afterDepositBalance - beforeDepositBalance;
+        uint256 depositFeeAmount = amount.mul(depositFee).div(FEE_SCALE);
+        _asset.safeTransfer(factorFeeRecipient, depositFeeAmount);
+        emit DepositFeeCharge(depositFeeAmount);
+    }
+
+    /**
+     * @notice Allows an external user to perform the harvest operation.
+     */
+    function harvest() external onlyKeeper nonReentrant {
+        _harvest(tx.origin);
+    }
+
+    /**
+     * @notice Performs the harvest operation, claiming rewards pendle and swapping them to lp pendle token.
+     */
+    function _harvest(address callFeeRecipient) internal whenNotPaused {
+        address[] memory stakingTokens = new address[](1);
+        stakingTokens[0] = address(_asset);
+
+        address[][] memory rewardTokens = new address[][](1);
+        rewardTokens[0] = new address[](2);
+        rewardTokens[0][0] = penpieToken;
+        rewardTokens[0][1] = pendleToken;
+
+        bool withPNP = true;
+        IMasterPenpie(masterPenpie).multiclaimSpecPNP(stakingTokens, rewardTokens, withPNP);
+        uint256 balancePenpie = IERC20(penpieToken).balanceOf(address(this));
+        if (balancePenpie > 0) {
+            swapCamelotPenpieWeth(balancePenpie);
+        }
+        uint256 balancePendle = IERC20(pendleToken).balanceOf(address(this));
+        if (balancePendle > 0) {
+            swapUniswap(pendleToken, weth, balancePendle, 0);
+        }
+        if (balancePenpie > 0 || balancePendle > 0) {
+            chargeFees(callFeeRecipient);
+            uint256 harvestAmount = IERC20(weth).balanceOf(address(this));
+
+            swapBalancer(wstethpool, weth, IERC20(weth).balanceOf(address(this)), 0);
+            uint256 balanceWSTETH = IERC20(wsteth).balanceOf(address(this));
+            _deposit(balanceWSTETH);
+            IPenpieDepositorHelper(penpieDepositorHelper).depositMarket(address(_asset), _asset.balanceOf(address(this)));
+            lastHarvest = block.timestamp;
+            emit StrategyHarvested(msg.sender, harvestAmount);
+        }
+    }
+
+    function _deposit(uint256 amount) internal {
+        IPendleRouter.SwapData memory swapData = IPendleRouter.SwapData({
+            swapType: IPendleRouter.SwapType.NONE,
+            extRouter: address(0),
+            extCalldata: '0x',
+            needScale: false
+        });
+        IPendleRouter.TokenInput memory tokenInput = IPendleRouter.TokenInput({
+            tokenIn: wsteth,
+            netTokenIn: amount,
+            tokenMintSy: wsteth,
+            bulk: address(0),
+            pendleSwap: address(0),
+            swapData: swapData
+        });
+        IPendleRouter.ApproxParams memory approx = IPendleRouter.ApproxParams({
+            guessMin: 0,
+            guessMax: type(uint256).max,
+            guessOffchain: 0, // pass 0 in to skip this variable
+            maxIteration: 256, // every iteration, the diff between guessMin and guessMax will be divided by 2
+            eps: 1e15
+        });
+
+        (uint256 netOut, uint256 netSyFee) = IPendleRouter(pendleRouter).swapExactTokenForPt(
+            address(this),
+            this.asset(),
+            0,
+            approx,
+            tokenInput
+        );
+
+        IPendleRouter(pendleRouter).addLiquiditySinglePt(address(this), this.asset(), netOut, 0, approx);
+        emit DepositPendle(amount);
+    }
+
+    /**
+     * @notice Charges the performance fees after the harvest operation.
+     */
+    function chargeFees(address callFeeRecipient) internal {
+        uint256 feeAmount = IERC20(weth).balanceOf(address(this)).mul(performanceFee).div(FEE_SCALE);
+
+        uint256 callFeeAmount = feeAmount.mul(callFee).div(FEE_SCALE);
+        IERC20(weth).safeTransfer(callFeeRecipient, callFeeAmount);
+
+        uint256 factorFeeAmount = feeAmount.mul(factorFee).div(FEE_SCALE);
+        IERC20(weth).safeTransfer(factorFeeRecipient, factorFeeAmount);
+
+        uint256 strategistFeeAmount = feeAmount.mul(strategistFee).div(FEE_SCALE);
+        IERC20(weth).safeTransfer(strategist, strategistFeeAmount);
+
+        emit ChargedFees(callFeeAmount, factorFeeAmount, strategistFeeAmount);
+    }
+
+    /**
+     * @notice Withdraws the specified amount of tokens and sends them to the vault.
+     * @param amount The amount of tokens to be withdrawn.
+     */
+    function withdraw(uint256 amount) external nonReentrant {
+        require(msg.sender == address(_vault), '!vault');
+        uint256 totalBalance = this.balanceOf();
+        require(amount <= totalBalance, 'Insufficient total balance');
+        //charge fee
+        IPenpieDepositorHelper(penpieDepositorHelper).withdrawMarket(address(_asset), amount);
+        uint256 withdrawFeeAmount = amount.mul(withdrawFee).div(FEE_SCALE);
+        IERC20(_asset).safeTransfer(factorFeeRecipient, withdrawFeeAmount);
+        uint256 withdrawAmount = amount - withdrawFeeAmount;
+        IERC20(_asset).safeTransfer(this.vault(), withdrawAmount);
+
+        emit Withdraw(this.balanceOf());
+    }
+
+    /**
+     * @notice Exits the strategy by withdrawing all the assets.
+     */
+    function exit() external nonReentrant {
+        require(msg.sender == address(_vault), '!vault');
+        uint256 balancePool = IPenpieDepositorHelper(penpieDepositorHelper).balance(address(_asset), address(this));
+        IPenpieDepositorHelper(penpieDepositorHelper).withdrawMarket(address(_asset), balancePool);
+        IERC20(_asset).safeTransfer(this.vault(), this.balanceOf());
+    }
+
+    /**
+     * @notice Emergency function to withdraw all assets and pause the strategy.
+     */
+    function panic() external onlyManager {
+        _pause();
+        _removeAllowances();
+    }
+
+    /**
+     * @notice Pauses the strategy and removes token allowances.
+     */
+    function pause() external onlyManager {
+        _pause();
+        _removeAllowances();
+    }
+
+    /**
+     * @notice Unpauses the strategy and gives token allowances.
+     */
+    function unpause() external onlyManager {
+        _unpause();
+        _giveAllowances();
+    }
+
+    /**
+     * @notice Gives allowances to the pendle router.
+     */
+    function _giveAllowances() internal {
+        IERC20(wsteth).safeApprove(pendleRouter, type(uint256).max);
+        IERC20(pendlePTToken).safeApprove(pendleRouter, type(uint256).max);
+        _asset.safeApprove(penpieDepositorHelper, type(uint256).max);
+        _asset.safeApprove(penpiePendleStaking, type(uint256).max);
+        IERC20(penpieToken).safeApprove(penpieSwapRouter, type(uint256).max);
+    }
+
+    /**
+     * @notice Removes allowances from the pendle router.
+     */
+    function _removeAllowances() internal {
+        IERC20(wsteth).safeApprove(pendleRouter, 0);
+        IERC20(pendlePTToken).safeApprove(pendleRouter, 0);
+        _asset.safeApprove(penpieDepositorHelper, 0);
+        _asset.safeApprove(penpiePendleStaking, 0);
+        IERC20(penpieToken).safeApprove(penpieSwapRouter, 0);
+    }
+
+    /**
+     * @notice Authorizes an upgrade of the strategy's implementation.
+     * @param newImplementation The address of the new implementation.
+     */
+    function _authorizeUpgrade(address newImplementation) internal override {
+        require(address(_vault) == msg.sender, 'Not vault!');
+    }
+
+    function swapBalancer(bytes32 _pool, address tokenIn, uint256 amountIn, uint256 minAmountOut) internal {
+        // Construct the params for the swap
+        IERC20(tokenIn).approve(address(balancerVault), amountIn);
+        IVault.SingleSwap memory singleSwap = IVault.SingleSwap({
+            poolId: _pool,
+            kind: IVault.SwapKind.GIVEN_IN,
+            assetIn: IAsset(tokenIn),
+            assetOut: IAsset(wsteth),
+            amount: amountIn,
+            userData: '0x'
+        });
+
+        IVault.FundManagement memory funds = IVault.FundManagement({
+            sender: address(this),
+            fromInternalBalance: false,
+            recipient: payable(address(this)),
+            toInternalBalance: false
+        });
+
+        uint256 deadline = block.timestamp;
+
+        // Perform the swap
+        balancerVault.swap(singleSwap, funds, minAmountOut, deadline);
+    }
+
+    function swapUniswap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amount,
+        uint256 amountOutMinimum
+    ) internal returns (uint256) {
+        TransferHelper.safeApprove(tokenIn, address(swapRouter), amount);
+
+        uint24 poolFee = 3000;
+
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            fee: poolFee,
+            recipient: address(this),
+            deadline: block.timestamp,
+            amountIn: amount,
+            amountOutMinimum: amountOutMinimum,
+            sqrtPriceLimitX96: 0
+        });
+
+        return ISwapRouter(swapRouter).exactInputSingle(params);
+    }
+
+    
+
+    /**
+     * @notice Swaps tokens using the provided path.
+     * @param _amountIn The amount of input tokens to be swapped.
+     */
+    function swapCamelotPenpieWeth(uint256 _amountIn) internal {
+        address[] memory path = new address[](2);
+
+        path[0] = penpieToken;
+        path[1] = weth;
+        
+        ICamelot(penpieSwapRouter).swapExactTokensForTokensSupportingFeeOnTransferTokens(
+            _amountIn,
+            0,
+            path,
+            address(this),
+            address(0),
+            block.timestamp
+        );
+    }
+
+    /**
+     * @notice Sets the harvestOnDeposit flag and adjusts the withdrawal fee accordingly.
+     * @param _harvestOnDeposit A boolean flag indicating whether to harvest on deposit or not.
+     * If set to true, the withdrawal fee will be set to 0.
+     * If set to false, the withdrawal fee will be set to 10000 (1%).
+     */
+    function setHarvestOnDeposit(bool _harvestOnDeposit) external onlyManager {
+        harvestOnDeposit = _harvestOnDeposit;
+        if (harvestOnDeposit) {
+            setWithdrawFee(0);
+        } else {
+            setWithdrawFee(10000);
+        }
+    }
+}
+

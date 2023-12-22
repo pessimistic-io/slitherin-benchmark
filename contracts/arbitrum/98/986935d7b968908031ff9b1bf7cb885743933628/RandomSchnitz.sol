@@ -1,0 +1,25 @@
+pragma solidity ^0.6.6;
+pragma experimental ABIEncoderV2;
+
+struct TokenMetadata {
+	address token;
+	string name;
+}
+
+contract RandomSchnitz {
+    string[] public a;
+    string public b;
+    TokenMetadata public c;
+    
+    function test(string[] memory _a) public {
+        a = _a;
+    }
+    
+    function test2(string memory _a) public {
+        b = _a;
+    }
+    
+    function PutInSomething(TokenMetadata memory _a) public {
+        c = _a;
+    }
+}

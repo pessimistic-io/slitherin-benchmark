@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.13;
+
+import "./Initializable.sol";
+import "./UUPSUpgradeable.sol";
+import "./OwnableUpgradeableVersionable.sol";
+import "./OwnableUpgradeableAdminable.sol";
+
+abstract contract UpgradeableBase is
+    Initializable,
+    OwnableUpgradeableVersionable,
+    OwnableUpgradeableAdminable,
+    UUPSUpgradeable
+{
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    function initialize() public virtual onlyInitializing {
+        __Ownable_init();
+        __UUPSUpgradeable_init();
+    }
+
+    function _authorizeUpgrade(address newImplementation)
+        internal
+        virtual
+        override
+        onlyOwner
+    {}
+}
+

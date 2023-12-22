@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+pragma solidity >=0.8.19;
+
+import { IAdminable } from "./IAdminable.sol";
+import { Errors } from "./libraries_Errors.sol";
+
+/// @title Adminable
+/// @notice See the documentation in {IAdminable}.
+abstract contract Adminable is IAdminable {
+    /*//////////////////////////////////////////////////////////////////////////
+                                       STORAGE
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IAdminable
+    address public override admin;
+
+    /*//////////////////////////////////////////////////////////////////////////
+                                      MODIFIERS
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /// @notice Reverts if called by any account other than the admin.
+    modifier onlyAdmin() {
+        if (admin != msg.sender) {
+            revert Errors.CallerNotAdmin({ admin: admin, caller: msg.sender });
+        }
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////////////////
+                         USER-FACING NON-CONSTANT FUNCTIONS
+    //////////////////////////////////////////////////////////////////////////*/
+
+    /// @inheritdoc IAdminable
+    function transferAdmin(address newAdmin) public virtual override onlyAdmin {
+        // Effects: update the admin.
+        admin = newAdmin;
+
+        // Log the transfer of the admin.
+        emit IAdminable.TransferAdmin({ oldAdmin: msg.sender, newAdmin: newAdmin });
+    }
+}
+

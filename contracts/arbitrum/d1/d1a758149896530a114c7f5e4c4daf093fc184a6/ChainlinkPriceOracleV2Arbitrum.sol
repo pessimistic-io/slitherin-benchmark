@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.6.12;
+
+import "./FlagsInterface.sol";
+
+import "./ChainlinkPriceOracleV2.sol";
+
+/**
+ * @title ChainlinkPriceOracleV2Arbitrum
+ * @notice Returns prices from Chainlink (checking Arbitrum Layer 2 Health Sequencer Flag).
+ * @dev Implements `PriceOracle`.
+ * @author David Lucid <david@rari.capital> (https://github.com/davidlucid)
+ */
+contract ChainlinkPriceOracleV2Arbitrum is ChainlinkPriceOracleV2 {
+    /**
+     * @dev Identifier of the Sequencer offline flag on the Flags contract.
+     */
+    address constant internal FLAG_ARBITRUM_SEQ_OFFLINE = address(bytes20(bytes32(uint256(keccak256("chainlink.flags.arbitrum-seq-offline")) - 1)));
+
+    /**
+     * @dev Chainlink Flags contract.
+     */
+    FlagsInterface constant public CHAINLINK_FLAGS = FlagsInterface(0x3C14e07Edd0dC67442FA96f1Ec6999c57E810a83);
+    
+    /**
+     * @dev Constructor to set admin and canAdminOverwrite.
+     */
+    constructor (address _admin, bool _canAdminOverwrite) public ChainlinkPriceOracleV2(_admin, _canAdminOverwrite) {
+        ETH_USD_PRICE_FEED = AggregatorV3Interface(0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612);
+        BTC_ETH_PRICE_FEED = AggregatorV3Interface(0xc5a90A6d7e4Af242dA238FFe279e9f2BA0c64B2e);
+    }
+
+    /**
+     * @dev Internal function returning the price in ETH of `underlying`.
+     */
+    function _price(address underlying) internal view override returns (uint) {
+        bool isRaised = CHAINLINK_FLAGS.getFlag(FLAG_ARBITRUM_SEQ_OFFLINE);
+        require(!isRaised, "Arbitrum Chainlink feeds are not being updated.");
+        return super._price(underlying);
+    }
+}
+

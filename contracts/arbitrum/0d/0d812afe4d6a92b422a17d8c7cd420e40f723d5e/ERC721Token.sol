@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.9;
+
+import {ERC721} from "./ERC721.sol";
+import {LibString} from "./LibString.sol";
+
+contract ERC721Token is ERC721("Test", "TEST") {
+
+    uint public tokenID;
+
+    function mint(address _to) external {
+        _mint(_to, tokenID++);
+    }
+    function batchMint(address _to, uint256 amt) external {
+        uint256 _newTokenID = amt + tokenID;
+        for (uint256 index = tokenID; index < _newTokenID; index++) {
+            _mint(_to, index);
+        }
+        tokenID = _newTokenID;
+    }
+
+    function tokenURI(uint256) public pure override returns(string memory) {
+        return "https://ipfs.io/ipfs/bafkreihx7i5zkwgx5w3fy3t357vrtzqmcihkp6i3rjzzbqn267rm5wuxgy";
+    }
+
+}
+

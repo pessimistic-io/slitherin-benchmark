@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity ^0.8.0;
+
+interface IDigitalCollectibleFactory {
+
+    /*************** EVENTS ***************/
+    event CreatedDigitalCollectible(address _entity, address _digitalCollectible);
+    event CurrentCreationCodeUpdated(address _entity, bytes _creationCode);
+    event CurrentParamsUpdated(address _entity, bytes _params);
+    
+    struct DigitalCollectibleCreationConfig {
+        bytes creationCode;
+        bytes params;
+    }
+
+    function createDigitalCollectible(address _entity) external  returns (address _digitalCollectible);
+
+    function isDAODigitalCollectible(address _digitalCollectible) external view returns(bool);
+
+    function getDigitalCollectiblesForEntity(address _entity) external view returns(address[] memory);
+
+    function setCurrentCreationCodeForEntity(address _entity, bytes memory _creationCode) external;
+
+    function setCurrentParamsForEntity(address _entity, bytes memory _params) external;
+
+    function getCurrentCreationConfigForEntity(address _entity) external view returns(DigitalCollectibleCreationConfig memory);
+
+    function getAllDigitalCollectibles() external view returns(address[] memory);
+}

@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/// @title ERC20 value oracle interface
+interface IERC20ValueOracle {
+    /// @notice Emitted when risk factors are set
+    /// @param collateralFactor Collateral factor
+    /// @param borrowFactor Borrow factor
+    event RiskFactorsSet(int256 indexed collateralFactor, int256 indexed borrowFactor);
+
+    function collateralFactor() external view returns (int256 collateralFactor);
+
+    function borrowFactor() external view returns (int256 borrowFactor);
+
+    function calcValue(int256 balance) external view returns (int256 value, int256 riskAdjustedValue);
+
+    function getValues()
+        external
+        view
+        returns (int256 value, int256 collateralAdjustedValue, int256 borrowAdjustedValue);
+}
+

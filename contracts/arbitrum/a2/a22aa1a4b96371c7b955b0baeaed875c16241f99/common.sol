@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.9;
+
+address constant ONEINCH_ROUTER = 0x1111111254EEB25477B68fb85Ed929f73A960582;
+address constant OPERATOR_REGISTRY = 0x0F1a301192734dBcB660608d82954505521056D8;
+
+uint256 constant LZ_GAS = 123;
+

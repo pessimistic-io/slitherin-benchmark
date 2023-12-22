@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+pragma solidity =0.8.14;
+
+import { IERC20 } from "./IERC20.sol";
+import { TransparentUpgradeableProxy } from "./TransparentUpgradeableProxy.sol";
+
+import { ProxyAdminDeployer } from "./ProxyAdminDeployer.sol";
+
+import { IClearingHouse } from "./IClearingHouse.sol";
+import { IInsuranceFund } from "./IInsuranceFund.sol";
+
+abstract contract InsuranceFundDeployer is ProxyAdminDeployer {
+    function _deployProxyForInsuranceFund(address insuranceFundLogicAddress) internal returns (IInsuranceFund) {
+        return
+            IInsuranceFund(
+                address(new TransparentUpgradeableProxy(insuranceFundLogicAddress, address(proxyAdmin), hex''))
+            );
+    }
+
+    function _initializeInsuranceFund(
+        IInsuranceFund insuranceFund,
+        IERC20 settlementToken,
+        IClearingHouse clearingHouse
+    ) internal {
+        insuranceFund.initialize(
+            settlementToken,
+            address(clearingHouse),
+            'RageTrade iSettlementToken',
+            'iSettlementToken'
+        );
+    }
+}
+

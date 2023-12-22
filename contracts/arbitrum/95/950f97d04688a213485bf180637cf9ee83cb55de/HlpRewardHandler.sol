@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.19;
+
+import "./SafeERC20Upgradeable.sol";
+import "./ReentrancyGuardUpgradeable.sol";
+import "./PausableUpgradeable.sol";
+import "./OwnableUpgradeable.sol";
+import "./SafeERC20Upgradeable.sol";
+//import IWater
+import "./IWater.sol";
+
+import { IRumVault } from "./IRumVault.sol";
+import { IHlpRewardHandler } from "./IHlpRewardHandler.sol";
+import { IRewarder } from "./IRewarder.sol";
+
+interface IRum {
+    function positionInfo(address _user, uint256 _positionId) external view returns (IRumVault.PositionInfo memory);
+}
+
+contract HlpRewardHandler is IHlpRewardHandler, OwnableUpgradeable, ReentrancyGuardUpgradeable, PausableUpgradeable {
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+
+    /* ========== STATE VARIABLES ========== */
+    uint256 public constant MAX_BPS = 10_000;
+    uint256 public accUSDCperTokens;
+    uint256 public distributedUSDCRewards;
+    uint256 public teamRewardBps;
+    uint256 public CEIL_SLOPE_1;
+    uint256 public CEIL_SLOPE_2;
+    uint256 public MAX_INTEREST_SLOPE_1;
+    uint256 public MAX_INTEREST_SLOPE_2;
+
+    address public waterVault;
+    address public USDC;
+    address public usdcRewarder;
+
+    mapping(address => uint256) public debtRecordUSDC;
+
+    IERC20Upgradeable public podToken;
+
+    uint256[50] private __gaps;
+
+    address waterFeeReceiver;
+    address teamFeeReceiver;
+
+    /* ========== MODIFIERS ========== */
+    //add a modifier that only allow the rum vault to call the function
+    modifier onlyRumVault() {
+        require(msg.sender == address(podToken), "Only rum vault");
+        _;
+    }
+
+    modifier zeroAddress(address addr) {
+        require(addr != address(0), "Zero address");
+        _;
+    }
+    /* ========== EVENTS ========== */
+
+    event Recovered(address token, uint256 amount);
+    event RewardDistributionUpdated(uint256 teamBps);
+    event RewardDistributed(uint256 usdcRewards, uint256 toOwner, uint256 toWater, uint256 toRumUsers);
+    event SetWaterFeeReceiver(address waterFeeReceiver);
+    event SetTeamFeeReceiver(address teamFeeReceiver);
+
+    /* ========== CONSTRUCTOR ========== */
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address _podToken, address _waterVault, address _USDC) external initializer {
+        podToken = IERC20Upgradeable(_podToken);
+        waterVault = _waterVault;
+        USDC = _USDC;
+        __Ownable_init();
+        __Pausable_init();
+    }
+
+    // function to set teamRewardBps
+    function setTeamRewardBps(uint256 _teamRewardBps) public onlyOwner {
+        require(_teamRewardBps < MAX_BPS, "Invalid team reward bps");
+        teamRewardBps = _teamRewardBps;
+        emit RewardDistributionUpdated(teamRewardBps);
+    }
+
+    /* ========== SETTER BY OWNER ========== */
+
+    //function to to waterFeeReceiver emit an event
+    function setWaterFeeReceiver(address _waterFeeReceiver) public onlyOwner zeroAddress(_waterFeeReceiver) {
+        waterFeeReceiver = _waterFeeReceiver;
+        emit SetWaterFeeReceiver(waterFeeReceiver);
+    }
+
+    //function to to teamFeeReceiver emit an event
+    function setTeamFeeReceiver(address _teamFeeReceiver) public onlyOwner zeroAddress(_teamFeeReceiver) {
+        teamFeeReceiver = _teamFeeReceiver;
+        emit SetTeamFeeReceiver(teamFeeReceiver);
+    }
+
+    function setSlopeParams(
+        uint256 _ceilSlope1,
+        uint256 _ceilSlope2,
+        uint256 _max_interest_slope1,
+        uint256 _max_interest_slope2
+    ) public onlyOwner {
+        CEIL_SLOPE_1 = _ceilSlope1;
+        CEIL_SLOPE_2 = _ceilSlope2;
+        MAX_INTEREST_SLOPE_1 = _max_interest_slope1;
+        MAX_INTEREST_SLOPE_2 = _max_interest_slope2;
+    }
+
+    //function to set water vault to a new address
+    function setWaterVault(address _waterVault) public onlyOwner zeroAddress(_waterVault) {
+        waterVault = _waterVault;
+    }
+
+    //function setRumVault to a new address
+    function setRumVault(address _rumVault) public onlyOwner zeroAddress(_rumVault) {
+        podToken = IERC20Upgradeable(_rumVault);
+    }
+
+    function setUSDCRewarder(address _usdcRewarder) public onlyOwner {
+        usdcRewarder = _usdcRewarder;
+    }
+
+    /* ========== VIEWS ========== */
+
+    function totalSupply() public view returns (uint256) {
+        return IERC20Upgradeable(address(podToken)).totalSupply();
+    }
+
+    function getUserPosition(address _user, uint256 _positionId) public view returns (IRumVault.PositionInfo memory) {
+        return IRum(address(podToken)).positionInfo(_user, _positionId);
+    }
+
+    function getTotalPosition(address _user) public view returns (uint256) {
+        uint256 aggregatePosition;
+        uint256 posLen = IRumVault(address(podToken)).getNumbersOfPosition(_user);
+        for (uint256 i = 0; i < posLen; i++) {
+            IRumVault.PositionInfo memory _userInfo = getUserPosition(_user, i);
+            if (!_userInfo.isLiquidated && !_userInfo.isClosed) {
+                aggregatePosition += _userInfo.position;
+            }
+        }
+        return aggregatePosition;
+    }
+
+    function pendingRewardsUSDC(address account) public view returns (uint256) {
+        if (totalSupply() == 0) {
+            return 0;
+        }
+        uint256 UserTotalPODAmount = getTotalPosition(account);
+
+        uint256 pendings = (UserTotalPODAmount * accUSDCperTokens) / 1e18 - debtRecordUSDC[account];
+
+        return (pendings);
+    }
+
+    function getPendingUSDCRewards() public view returns (uint256) {
+        return IRewarder(usdcRewarder).pendingReward(address(podToken));
+    }
+
+    /* ========== CORE FUNCTIONS ========== */
+
+    function getRumSplit(uint256 _amount) public view returns (uint256, uint256, uint256) {
+        uint256 profit;
+        uint256 ownerSplit = (_amount * teamRewardBps) / MAX_BPS;
+        profit = _amount - ownerSplit;
+        uint256 waterShare = _getProfitSplit();
+        uint256 waterSplit = (profit * waterShare) / MAX_BPS;
+        uint256 rumUserSplit = profit - waterSplit;
+
+        return (ownerSplit, waterSplit, rumUserSplit);
+    }
+
+    function _getProfitSplit() internal view returns (uint256) {
+        uint256 utilRate = IRumVault(address(podToken)).getUtilizationRate();
+        uint256 waterSharePercent;
+        if (utilRate <= CEIL_SLOPE_1) {
+            waterSharePercent = MAX_INTEREST_SLOPE_1;
+            //Between 90%-95% utilization - 30% -70%  rewards split to water
+        } else if (utilRate <= CEIL_SLOPE_2) {
+            waterSharePercent = (MAX_INTEREST_SLOPE_1 +
+                ((utilRate - CEIL_SLOPE_1) * (MAX_INTEREST_SLOPE_2 - (MAX_INTEREST_SLOPE_1))) /
+                (CEIL_SLOPE_2 - (CEIL_SLOPE_1)));
+            //More then 95% utilization - 70%  rewards split to water
+        } else {
+            waterSharePercent = MAX_INTEREST_SLOPE_2;
+        }
+        return (waterSharePercent);
+    }
+
+    function distributeUSDC(uint256 _amount) internal {
+        //split rewards to rum users
+        if (totalSupply() > 0) {
+            accUSDCperTokens += (_amount * 1e18) / totalSupply();
+        }
+    }
+
+    function setDebtRecordUSDC(address _account) public onlyRumVault {
+        uint256 currentUserTotalPODAmount = getTotalPosition(_account);
+        debtRecordUSDC[_account] = (currentUserTotalPODAmount * accUSDCperTokens) / 1e18;
+    }
+
+    function setDebtRecordUSDCtemp(address _account) public onlyOwner {
+        uint256 currentUserTotalPODAmount = getTotalPosition(_account);
+        debtRecordUSDC[_account] = (currentUserTotalPODAmount * accUSDCperTokens) / 1e18;
+    }
+
+    function distributeRewards(uint256 _teamAmount, uint256 _waterAmount) internal {
+        IERC20Upgradeable(USDC).safeTransfer(teamFeeReceiver, _teamAmount);
+        //safeIncreaseAlloance to Water
+        //         IERC20Upgradeable(USDC).safeIncreaseAllowance(waterVault, _waterAmount);
+        //
+        //         IWater(waterVault).increaseTotalUSDC(_waterAmount);
+        IERC20Upgradeable(USDC).safeTransfer(waterFeeReceiver, _waterAmount);
+    }
+
+    function claimUSDCRewards(address _account) public {
+        address sender;
+        if (msg.sender == address(podToken)) {
+            sender = _account;
+        } else {
+            sender = msg.sender;
+        }
+
+        if (getPendingUSDCRewards() > 1e6) {
+            compoundRewards();
+        }
+
+        uint256 USDCRewards = pendingRewardsUSDC(sender);
+        if (USDCRewards > 0) {
+            uint256 currentUserTotalPODAmount = getTotalPosition(sender);
+            debtRecordUSDC[sender] = (currentUserTotalPODAmount * accUSDCperTokens) / 1e18;
+            distributedUSDCRewards += USDCRewards;
+            IERC20Upgradeable(USDC).safeTransfer(sender, USDCRewards);
+        }
+    }
+
+    function compoundRewards() public {
+        address[] memory pools = new address[](2);
+        pools[0] = 0xbE8f8AF5953869222eA8D39F1Be9d03766010B1C;
+        pools[1] = 0x92E586B8D4Bf59f4001604209A292621c716539a;
+
+        address[] memory nestedAddresses1 = new address[](3);
+        nestedAddresses1[0] = 0x665099B3e59367f02E5f9e039C3450E31c338788;
+        nestedAddresses1[1] = 0xCE3C078282df113eFc3D816E83Ca70f4c19d9daB;
+        nestedAddresses1[2] = 0x6D2c18B559C5343CB0703bB55AADB5f22152cC32;
+
+        address[] memory nestedAddresses2 = new address[](3);
+        nestedAddresses2[0] = 0xB698829C4C187C85859AD2085B24f308fC1195D3;
+        nestedAddresses2[1] = 0x94c22459b145F012F1c6791F2D729F7a22c44764;
+        nestedAddresses2[2] = 0xbEDd351c62111FB7216683C2A26319743a06F273;
+
+        address[][] memory rewarder = new address[][](2);
+        rewarder[0] = nestedAddresses1;
+        rewarder[1] = nestedAddresses2;
+
+        uint256 usdcRewards = IRumVault(address(podToken)).handleAndCompoundRewards(pools, rewarder);
+
+        (uint256 toOwner, uint256 toWater, uint256 toRumUsers) = getRumSplit(usdcRewards);
+
+        distributeUSDC(toRumUsers);
+        distributeRewards(toOwner, toWater);
+
+        emit RewardDistributed(usdcRewards, toOwner, toWater, toRumUsers);
+    }
+
+    // Added to support recovering LP Rewards from other systems such as BAL to be distributed to holders
+    function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
+        require(tokenAddress != address(podToken), "Cannot withdraw the staking token");
+        IERC20Upgradeable(tokenAddress).safeTransfer(owner(), tokenAmount);
+        emit Recovered(tokenAddress, tokenAmount);
+    }
+
+}
+

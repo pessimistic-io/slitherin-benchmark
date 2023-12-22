@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+// Inheritance
+import "./ISportsAMM.sol";
+import "./ISportPositionalMarket.sol";
+import "./ISportPositionalMarketManager.sol";
+import "./ProxyOwned.sol";
+import "./ProxyPausable.sol";
+import "./Initializable.sol";
+
+contract SportPositionalMarketData is Initializable, ProxyOwned, ProxyPausable {
+    struct ActiveMarketsOdds {
+        address market;
+        uint[] odds;
+    }
+
+    address public manager;
+    address public sportsAMM;
+
+    function initialize(address _owner) external initializer {
+        setOwner(_owner);
+    }
+
+    function getOddsForAllActiveMarkets() external view returns (ActiveMarketsOdds[] memory) {
+        address[] memory activeMarkets = ISportPositionalMarketManager(manager).activeMarkets(
+            0,
+            ISportPositionalMarketManager(manager).numActiveMarkets()
+        );
+        ActiveMarketsOdds[] memory marketOdds = new ActiveMarketsOdds[](activeMarkets.length);
+        for (uint i = 0; i < activeMarkets.length; i++) {
+            marketOdds[i].market = activeMarkets[i];
+            marketOdds[i].odds = ISportsAMM(sportsAMM).getMarketDefaultOdds(activeMarkets[i], false);
+        }
+        return marketOdds;
+    }
+
+    function setSportPositionalMarketManager(address _manager) external onlyOwner {
+        manager = _manager;
+        emit SportPositionalMarketManagerChanged(_manager);
+    }
+
+    function setSportsAMM(address _sportsAMM) external onlyOwner {
+        sportsAMM = _sportsAMM;
+        emit SetSportsAMM(_sportsAMM);
+    }
+
+    event SportPositionalMarketManagerChanged(address _manager);
+    event SetSportsAMM(address _sportsAMM);
+}
+

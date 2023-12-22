@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity =0.8.12;
+
+import {IUniswapV3Factory} from "./IUniswapV3Factory.sol";
+
+import {UniswapV3PoolDeployer} from "./UniswapV3PoolDeployer.sol";
+import {NoDelegateCall} from "./NoDelegateCall.sol";
+
+import {UniswapV3Pool} from "./UniswapV3Pool.sol";
+import {IUniswapV3Pool} from "./IUniswapV3Pool.sol";
+
+/// @title Canonical Uniswap V3 factory
+/// @notice Deploys Uniswap V3 pools and manages ownership and control over pool protocol fees
+contract UniswapV3Factory is IUniswapV3Factory, UniswapV3PoolDeployer, NoDelegateCall {
+    /// @inheritdoc IUniswapV3Factory
+    address public override owner;
+
+    // counter for deployed pools
+    uint24 public poolCounter;
+
+    /// @inheritdoc IUniswapV3Factory
+    mapping(uint24 => int24) public override feeAmountTickSpacing;
+    /// @inheritdoc IUniswapV3Factory
+    mapping(address => mapping(address => mapping(uint24 => address))) public override getPool;
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnerChanged(address(0), msg.sender);
+
+        // feeAmountTickSpacing[500] = 10;
+        // emit FeeAmountEnabled(500, 10);
+        // feeAmountTickSpacing[3000] = 60;
+        // emit FeeAmountEnabled(3000, 60);
+        // feeAmountTickSpacing[10000] = 200;
+        // emit FeeAmountEnabled(10000, 200);
+    }
+
+    /// @inheritdoc IUniswapV3Factory
+    function createPool(address tokenA, address tokenB) external override noDelegateCall returns (address pool) {
+        require(tokenA != tokenB);
+        (address token0, address token1) = (tokenA, tokenB);
+        // (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        require(token0 != address(0));
+        // int24 tickSpacing = feeAmountTickSpacing[fee];
+        int24 tickSpacing = 60;
+        // require(tickSpacing != 0);
+        require(getPool[token0][token1][poolCounter] == address(0));
+        pool = deploy(address(this), token0, token1, poolCounter, tickSpacing);
+        getPool[token0][token1][poolCounter] = pool;
+        // populate mapping in the reverse direction, deliberate choice to avoid the cost of comparing addresses
+        getPool[token1][token0][poolCounter] = pool;
+        poolCounter += 1;
+        emit PoolCreated(token0, token1, poolCounter, tickSpacing, pool);
+    }
+
+    /// @inheritdoc IUniswapV3Factory
+    function setOwner(address _owner) external override {
+        require(msg.sender == owner);
+        emit OwnerChanged(owner, _owner);
+        owner = _owner;
+    }
+
+    /// @inheritdoc IUniswapV3Factory
+    function enableFeeAmount(uint24 fee, int24 tickSpacing) public override {
+        require(msg.sender == owner);
+        require(fee < 1000000);
+        // tick spacing is capped at 16384 to prevent the situation where tickSpacing is so large that
+        // TickBitmap#nextInitializedTickWithinOneWord overflows int24 container from a valid tick
+        // 16384 ticks represents a >5x price change with ticks of 1 bips
+        require(tickSpacing > 0 && tickSpacing < 16384);
+        require(feeAmountTickSpacing[fee] == 0);
+
+        feeAmountTickSpacing[fee] = tickSpacing;
+        emit FeeAmountEnabled(fee, tickSpacing);
+    }
+
+    // @ AlcorFinance
+    function setAlcorOptionPoolAddress(
+        address _alcorOptionPoolAddress_,
+        address tokenA,
+        address tokenB,
+        uint24 fee
+    ) external {
+        // check the caller is owner
+        require(msg.sender == owner);
+        IUniswapV3Pool(getPool[tokenA][tokenB][fee]).setAlcorOptionPoolAddress(_alcorOptionPoolAddress_);
+    }
+}
+

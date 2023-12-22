@@ -1,7 +1,8 @@
 import aiohttp
+import asyncio
 from config import API_ENDPOINT_BY_CHAIN, API_KEY_BY_CHAIN
 
-async def get_raw_source(address:str, chain_id:str):
+async def get_raw_source(address:str, chain_id:str, retry:int = 3):
     """Function download contract from etherscan(or other chain scan)
 
     Args:
@@ -16,11 +17,16 @@ async def get_raw_source(address:str, chain_id:str):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
-                print(resp.status)
-                resp_json = await resp.json()
-                if "result" in resp_json and len(resp_json["result"]) > 0:
-                    if isinstance(resp_json["result"], list):
-                        return resp_json["result"][0]        
+                if resp.status == 200:
+                    resp_json = await resp.json()
+                    if "result" in resp_json and len(resp_json["result"]) > 0:
+                        if isinstance(resp_json["result"], list):
+                            return resp_json["result"][0]
+                else:
+                    print(f"retry status {resp.status}")
+                    await asyncio.sleep(5)
+                    if retry > 0:
+                        return await get_raw_source(address, chain_id, retry-1) 
         return None
     except Exception as error:
         print(error)

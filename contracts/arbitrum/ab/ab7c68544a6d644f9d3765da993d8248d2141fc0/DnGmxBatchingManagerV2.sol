@@ -1,0 +1,471 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.9;
+
+import { IERC20 } from "./IERC20.sol";
+import { OwnableUpgradeable } from "./OwnableUpgradeable.sol";
+import { PausableUpgradeable } from "./PausableUpgradeable.sol";
+
+import { FullMath } from "./FullMath.sol";
+
+import { IVodkaVault } from "./IVodkaVault.sol";
+import { IDnGmxBatchingManager } from "./IDnGmxBatchingManager.sol";
+import { IGlpManager } from "./IGlpManager.sol";
+import { IRewardRouterV2 } from "./IRewardRouterV2.sol";
+import { IVault } from "./IVault.sol";
+
+import { IBatchingManagerBypass } from "./IBatchingManagerBypass.sol";
+
+import { SafeCast } from "./SafeCast.sol";
+
+/**
+ * @title Batching Manager to avoid glp transfer cooldowm
+ * @notice batches the incoming deposit token depoists after converting them to glp
+ * @notice It is upgradable contract (via TransparentUpgradeableProxy proxy owned by ProxyAdmin)
+ * @author Vodka
+ **/
+
+contract DnGmxBatchingManagerV2 is IDnGmxBatchingManager, OwnableUpgradeable, PausableUpgradeable {
+    using FullMath for uint256;
+    using FullMath for uint128;
+    using SafeCast for uint256;
+
+    struct VaultBatchingState {
+        // round indentifier
+        uint256 currentRound;
+        uint256 roundGlpDepositPending;
+        uint256 roundSharesMinted;
+        // amount of sGlp received in current round
+        uint256 roundGlpStaked;
+        // amount of usdc recieved in current round
+        uint256 roundUsdcBalance;
+        // stores junior vault shares accumuated for user
+        mapping(address => UserDeposit) userDeposits;
+        // stores total glp received in a given round
+        mapping(uint256 => RoundDeposit) roundDeposits;
+    }
+
+    uint256 private constant MAX_BPS = 10_000;
+
+    // keeper can be EOA or smart contracts which executes stake and batch
+    address public keeper;
+    // delta neutral junior tranche
+    IVodkaVault public VodkaVault;
+
+    // max allowed slippage threshold (in bps) when converting usdc to sGlp
+    uint256 public slippageThresholdGmxBps;
+    // accumulator to keep track of sGlp direclty (as a means of compounding) send by junior vault
+    uint256 public VodkaVaultGlpBalance;
+
+    uint256 public depositCap;
+
+    uint256 public glpDepositPendingThreshold;
+
+    // staked glp
+    IERC20 private sGlp;
+    // usdc
+    IERC20 private usdc;
+
+    // gmx's GlpManager (GlpManager.sol), which can burn/mint glp
+    IGlpManager private glpManager;
+    // gmx's Vault (vault.sol) contract
+    IVault private gmxUnderlyingVault;
+    // gmx's RewardRouterV2 (RewardRouterV2.sol) contract
+    IRewardRouterV2 private rewardRouter;
+
+    // batching mangager bypass contract
+    IBatchingManagerBypass private bypass;
+
+    // batching manager's state
+    VaultBatchingState public vaultBatchingState;
+
+    // these gaps are added to allow adding new variables without shifting down inheritance chain
+    uint256[50] private __gaps;
+
+    /// @dev ensures caller is junior vault
+    modifier onlyVodkaVault() {
+        if (msg.sender != address(VodkaVault)) revert CallerNotVault();
+        _;
+    }
+
+    /// @dev ensures caller is keeper
+    modifier onlyKeeper() {
+        if (msg.sender != keeper) revert CallerNotKeeper();
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            INIT FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice initializes the proxy state
+    /// @dev this function is supposed to be called only once
+    /// @param _sGlp address of staked glp
+    /// @param _usdc address of usdc
+    /// @param _rewardRouter gmx protocol's reward router v2
+    /// @param _VodkaVault address of delta neutral junior tranche
+    function initialize(
+        IERC20 _sGlp,
+        IERC20 _usdc,
+        IRewardRouterV2 _rewardRouter,
+        IGlpManager _glpManager,
+        address _VodkaVault,
+        address _keeper
+    ) external initializer {
+        __Ownable_init();
+        __Pausable_init();
+        __GMXBatchingManager_init(_sGlp, _usdc, _rewardRouter, _glpManager, _VodkaVault, _keeper);
+    }
+
+    /* solhint-disable-next-line func-name-mixedcase */
+    function __GMXBatchingManager_init(
+        IERC20 _sGlp,
+        IERC20 _usdc,
+        IRewardRouterV2 _rewardRouter,
+        IGlpManager _glpManager,
+        address _VodkaVault,
+        address _keeper
+    ) internal onlyInitializing {
+        sGlp = _sGlp;
+        usdc = _usdc;
+        glpManager = _glpManager;
+        rewardRouter = _rewardRouter;
+
+        gmxUnderlyingVault = IVault(glpManager.vault());
+        VodkaVault = IVodkaVault(_VodkaVault);
+
+        keeper = _keeper;
+        emit KeeperUpdated(_keeper);
+
+        vaultBatchingState.currentRound = 1;
+    }
+
+    function resetGMXBatchingManager(IRewardRouterV2 _rewardRouter) external onlyOwner {
+        rewardRouter = _rewardRouter;
+    }
+    /// @notice grants the allowance to the vault to pull sGLP (via safeTransfer from in vault.deposit)
+    /// @dev allowance is granted while vault is added via addVault, this is only failsafe if that allowance is exhausted
+    function grantAllowances() external onlyOwner {
+        sGlp.approve(address(VodkaVault), type(uint256).max);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             ADMIN SETTERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice sets the keeper address (to pause & unpause deposits)
+    /// @param _keeper address of keeper
+    function setKeeper(address _keeper) external onlyOwner {
+        keeper = _keeper;
+        emit KeeperUpdated(_keeper);
+    }
+
+    function setBypass(IBatchingManagerBypass _bypass) external onlyOwner {
+        bypass = _bypass;
+    }
+
+    /// @notice sets the slippage (in bps) to use while staking on gmx
+    /// @param _slippageThresholdGmxBps slippage (in bps)
+    function setThresholds(uint256 _slippageThresholdGmxBps, uint256 _glpDepositPendingThreshold) external onlyOwner {
+        slippageThresholdGmxBps = _slippageThresholdGmxBps;
+        glpDepositPendingThreshold = _glpDepositPendingThreshold;
+        emit ThresholdsUpdated(_slippageThresholdGmxBps, _glpDepositPendingThreshold);
+    }
+
+    function setDepositCap(uint256 _depositCap) external onlyOwner {
+        depositCap = _depositCap;
+        emit DepositCapUpdated(_depositCap);
+    }
+
+    /// @notice pauses deposits (to prevent DOS due to GMX 15 min cooldown)
+    function pauseDeposit() external onlyKeeper {
+        _pause();
+    }
+
+    /// @notice unpauses the deposit function
+    function unpauseDeposit() external onlyKeeper {
+        _unpause();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            PROTOCOL FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice convert the token into glp and obtain staked glp
+    /// @dev this function should be only called by junior vault
+    /// @param token address of input token (should be supported on gmx)
+    /// @param amount amount of token to be used
+    /// @param minUSDG minimum output of swap in terms of USDG
+    function depositToken(
+        address token,
+        uint256 amount,
+        uint256 minUSDG
+    ) external whenNotPaused onlyVodkaVault returns (uint256 glpStaked) {
+        // revert for zero values
+        if (token == address(0)) revert InvalidInput(0x30);
+        if (amount == 0) revert InvalidInput(0x31);
+
+        // VodkaVault gives approval to batching manager to spend token
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+
+        // convert tokens to glp
+        glpStaked = _stakeGlp(token, amount, minUSDG);
+        VodkaVaultGlpBalance += glpStaked.toUint128();
+
+        emit DepositToken(0, token, msg.sender, amount, glpStaked);
+    }
+
+    function depositUsdc(uint256 amount, address receiver) external whenNotPaused {
+        // revert for zero values
+        if (amount == 0) revert InvalidInput(0x21);
+        if (receiver == address(0)) revert InvalidInput(0x22);
+        if (vaultBatchingState.roundUsdcBalance + amount > depositCap) revert DepositCapBreached();
+
+        // user gives approval to batching manager to spend usdc
+        usdc.transferFrom(msg.sender, address(this), amount);
+
+        UserDeposit storage userDeposit = vaultBatchingState.userDeposits[receiver];
+        uint128 userUsdcBalance = userDeposit.usdcBalance;
+
+        // Convert previous round glp balance into unredeemed shares
+        uint256 userDepositRound = userDeposit.round;
+        if (userDepositRound < vaultBatchingState.currentRound && userUsdcBalance > 0) {
+            // update user's unclaimed shares with previous executed batch
+            RoundDeposit storage roundDeposit = vaultBatchingState.roundDeposits[userDepositRound];
+            userDeposit.unclaimedShares += userDeposit
+                .usdcBalance
+                .mulDiv(roundDeposit.totalShares, roundDeposit.totalUsdc)
+                .toUint128();
+            userUsdcBalance = 0;
+        }
+
+        // Update round and glp balance for current round
+        userDeposit.round = vaultBatchingState.currentRound;
+        userDeposit.usdcBalance = userUsdcBalance + amount.toUint128();
+        vaultBatchingState.roundUsdcBalance += amount.toUint128();
+
+        emit DepositToken(vaultBatchingState.currentRound, address(usdc), receiver, amount, 0);
+    }
+
+    /// @notice executes batch and deposits into appropriate vault with/without minting shares
+    function executeBatchStake() external whenNotPaused onlyKeeper {
+        // Harvest fees prior to executing batch deposit to prevent cooldown
+        VodkaVault.harvestFees();
+
+        // Convert usdc in round to sglp
+        _executeVaultUserBatchStake();
+
+        // To be unpaused when the staked amount is deposited
+        _pause();
+    }
+
+    /// @notice executes batch and deposits into appropriate vault with/without minting shares
+    function executeBatchDeposit(uint256 depositAmount) external onlyKeeper {
+        // If the deposit is paused then unpause on execute batch deposit
+        if (paused()) _unpause();
+
+        // Transfer vault glp directly, Needs to be called only for VodkaVault
+        if (VodkaVaultGlpBalance > 0) {
+            uint256 glpToTransfer = VodkaVaultGlpBalance;
+            VodkaVaultGlpBalance = 0;
+            sGlp.transfer(address(VodkaVault), glpToTransfer);
+            emit VaultDeposit(glpToTransfer);
+        }
+
+        _executeVaultUserBatchDeposit(depositAmount);
+
+        if (vaultBatchingState.roundGlpDepositPending > 0) _pause();
+    }
+
+    /// @notice claim the shares received from depositing batch
+    /// @param receiver address of receiver
+    /// @param amount amount of shares
+    function claim(address receiver, uint256 amount) external {
+        _claim(msg.sender, receiver, amount);
+    }
+
+    function claimAndRedeem(address receiver) external returns (uint256 glpReceived) {
+        // claimed shares would be transfered back to msg.sender and later user's complete balance is pulled
+        _claim(msg.sender, msg.sender, unclaimedShares(msg.sender));
+
+        uint256 shares = VodkaVault.balanceOf(msg.sender);
+        if (shares == 0) return 0;
+
+        // withdraw all shares from user
+        // user should have given approval to batching manager to spend VodkaVault shares
+        glpReceived = VodkaVault.redeem(shares, receiver, msg.sender);
+
+        emit ClaimedAndRedeemed(msg.sender, receiver, shares, glpReceived);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                GETTERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice gets the current active round
+    function currentRound() external view returns (uint256) {
+        return vaultBatchingState.currentRound;
+    }
+
+    /// @notice get the glp balance for a given vault and account address
+    /// @param account address of user
+    function usdcBalance(address account) public view returns (uint256 balance) {
+        balance = vaultBatchingState.userDeposits[account].usdcBalance;
+    }
+
+    /// @notice get the unclaimed shares for a given vault and account address
+    /// @param account address of user
+    function unclaimedShares(address account) public view returns (uint256 shares) {
+        UserDeposit memory userDeposit = vaultBatchingState.userDeposits[account];
+        shares = userDeposit.unclaimedShares;
+
+        if (userDeposit.round < vaultBatchingState.currentRound && userDeposit.usdcBalance > 0) {
+            RoundDeposit memory roundDeposit = vaultBatchingState.roundDeposits[userDeposit.round];
+            shares += userDeposit.usdcBalance.mulDiv(roundDeposit.totalShares, roundDeposit.totalUsdc).toUint128();
+        }
+    }
+
+    /// @notice get the glp balance for current active round
+    function roundUsdcBalance() external view returns (uint256) {
+        return vaultBatchingState.roundUsdcBalance;
+    }
+
+    /// @notice get the glp balance for current active round
+    function roundGlpStaked() external view returns (uint256) {
+        return vaultBatchingState.roundGlpStaked;
+    }
+
+    function roundGlpDepositPending() external view returns (uint256) {
+        return vaultBatchingState.roundGlpDepositPending;
+    }
+
+    function roundSharesMinted() external view returns (uint256) {
+        return vaultBatchingState.roundSharesMinted;
+    }
+
+    /// @notice get the vaultBatchingState of user deposits
+    /// @param account address of user
+    function userDeposits(address account) external view returns (UserDeposit memory) {
+        return vaultBatchingState.userDeposits[account];
+    }
+
+    /// @notice get the info for given vault and round
+    /// @param round address of user
+    function roundDeposits(uint256 round) external view returns (RoundDeposit memory) {
+        return vaultBatchingState.roundDeposits[round];
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             INTERNAL LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function _stakeGlp(
+        address token,
+        uint256 amount,
+        uint256 minUSDG
+    ) internal returns (uint256 glpStaked) {
+        // swap token to obtain sGLP
+        IERC20(token).approve(address(glpManager), amount);
+        // will revert if notional output is less than minUSDG
+        glpStaked = rewardRouter.mintAndStakeGlp(token, amount, minUSDG, 0);
+    }
+
+    function _executeVaultUserBatchStake() internal {
+        uint256 _roundUsdcBalance = vaultBatchingState.roundUsdcBalance;
+
+        if (_roundUsdcBalance == 0) revert NoUsdcBalance();
+
+        // use min price, because we are sending in usdc
+        uint256 price = gmxUnderlyingVault.getMinPrice(address(usdc));
+
+        // adjust for decimals and max possible slippage
+        uint256 minUsdg = _roundUsdcBalance.mulDiv(price * 1e12 * (MAX_BPS - slippageThresholdGmxBps), 1e30 * MAX_BPS);
+
+        uint256 _roundGlpStaked = _stakeGlp(address(usdc), _roundUsdcBalance, minUsdg);
+
+        vaultBatchingState.roundGlpStaked = _roundGlpStaked;
+        vaultBatchingState.roundGlpDepositPending = _roundGlpStaked;
+
+        emit BatchStake(vaultBatchingState.currentRound, _roundUsdcBalance, _roundGlpStaked);
+    }
+
+    function _executeVaultUserBatchDeposit(uint256 depositAmount) internal {
+        // Transfer user glp through deposit
+        if (vaultBatchingState.roundGlpStaked == 0) return;
+        if (depositAmount == 0) return;
+
+        uint256 sGlpToDeposit;
+        uint256 _roundGlpDepositPending = vaultBatchingState.roundGlpDepositPending;
+
+        if (_roundGlpDepositPending < depositAmount + glpDepositPendingThreshold)
+            sGlpToDeposit = _roundGlpDepositPending;
+        else sGlpToDeposit = depositAmount;
+
+        _roundGlpDepositPending -= sGlpToDeposit;
+        vaultBatchingState.roundGlpDepositPending = _roundGlpDepositPending;
+
+        sGlp.transfer(address(bypass), sGlpToDeposit);
+        uint256 totalShares = bypass.deposit(sGlpToDeposit, address(this));
+
+        vaultBatchingState.roundSharesMinted += totalShares;
+
+        emit PartialBatchDeposit(vaultBatchingState.currentRound, sGlpToDeposit, totalShares);
+
+        if (_roundGlpDepositPending == 0) {
+            // Update round data
+            vaultBatchingState.roundDeposits[vaultBatchingState.currentRound] = RoundDeposit(
+                vaultBatchingState.roundUsdcBalance.toUint128(),
+                vaultBatchingState.roundSharesMinted.toUint128()
+            );
+
+            emit BatchDeposit(
+                vaultBatchingState.currentRound,
+                vaultBatchingState.roundUsdcBalance,
+                vaultBatchingState.roundGlpStaked,
+                vaultBatchingState.roundSharesMinted
+            );
+
+            // reset curret round's bal and increase round id
+            vaultBatchingState.roundUsdcBalance = 0;
+            vaultBatchingState.roundGlpStaked = 0;
+            vaultBatchingState.roundSharesMinted = 0;
+            ++vaultBatchingState.currentRound;
+        }
+    }
+
+    function _claim(
+        address claimer,
+        address receiver,
+        uint256 amount
+    ) internal {
+        // revert for zero values
+        if (receiver == address(0)) revert InvalidInput(0x10);
+        if (amount == 0) revert InvalidInput(0x11);
+
+        UserDeposit storage userDeposit = vaultBatchingState.userDeposits[claimer];
+
+        uint128 userUsdcBalance = userDeposit.usdcBalance;
+        uint128 userUnclaimedShares = userDeposit.unclaimedShares;
+
+        {
+            // Convert previous round glp balance into unredeemed shares
+            uint256 userDepositRound = userDeposit.round;
+            if (userDepositRound < vaultBatchingState.currentRound && userUsdcBalance > 0) {
+                RoundDeposit storage roundDeposit = vaultBatchingState.roundDeposits[userDepositRound];
+                userUnclaimedShares += userUsdcBalance
+                    .mulDiv(roundDeposit.totalShares, roundDeposit.totalUsdc)
+                    .toUint128();
+                userDeposit.usdcBalance = 0;
+            }
+        }
+
+        if (userUnclaimedShares < amount.toUint128()) revert InsufficientShares(userUnclaimedShares);
+        userDeposit.unclaimedShares = userUnclaimedShares - amount.toUint128();
+
+        // transfer junior vault shares to user
+        VodkaVault.transfer(receiver, amount);
+
+        emit SharesClaimed(claimer, receiver, amount);
+    }
+}
+
