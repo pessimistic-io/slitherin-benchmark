@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.17;
+
+// Inheritances
+import {FloodPlain} from "./FloodPlain.sol";
+import {FloodPlainOnChainOrders} from "./FloodPlainOnChainOrders.sol";
+import {FloodPlainEncodedCalls} from "./FloodPlainEncodedCalls.sol";
+import {FloodPlainDirectFulfiller} from "./FloodPlainDirectFulfiller.sol";
+
+contract FloodPlainL2 is FloodPlain, FloodPlainOnChainOrders, FloodPlainEncodedCalls, FloodPlainDirectFulfiller {
+    constructor(address permit2, address admin) FloodPlain(permit2) FloodPlainEncodedCalls(admin) {}
+}
+

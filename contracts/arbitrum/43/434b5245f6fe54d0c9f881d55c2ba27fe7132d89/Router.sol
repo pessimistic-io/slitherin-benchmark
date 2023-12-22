@@ -1,0 +1,645 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.6.12;
+
+import "./SafeMath.sol";
+import "./IERC20.sol";
+import "./SafeERC20.sol";
+import "./Address.sol";
+import "./IWETH.sol";
+import "./IVault.sol";
+import "./IVaultPriceFeed.sol";
+import "./IRouter.sol";
+import "./IReferral.sol";
+
+contract Router is IRouter {
+    using SafeMath for uint256;
+    using SafeERC20 for IERC20;
+    using Address for address payable;
+
+    address public gov;
+
+    // wrapped BNB / ETH
+    address public immutable weth;
+    address public immutable usdg;
+    address public immutable vault;
+
+    // Referral contract
+    address public immutable referral;
+
+    mapping(address => bool) public plugins;
+    mapping(address => mapping(address => bool)) public approvedPlugins;
+
+    event Swap(
+        address account,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    );
+
+    modifier onlyGov() {
+        require(msg.sender == gov, "Router: forbidden");
+        _;
+    }
+
+    constructor(
+        address _vault,
+        address _usdg,
+        address _weth,
+        address _referral
+    ) public {
+        require(
+            _vault != address(0) &&
+                _usdg != address(0) &&
+                _weth != address(0) &&
+                _referral != address(0),
+            "Addresses cannot be zero"
+        );
+        vault = _vault;
+        usdg = _usdg;
+        weth = _weth;
+        referral = _referral;
+        gov = msg.sender;
+    }
+
+    receive() external payable {
+        require(msg.sender == weth, "Router: invalid sender");
+    }
+
+    function setGov(address _gov) external onlyGov {
+        gov = _gov;
+    }
+
+    function addPlugin(address _plugin) external override onlyGov {
+        plugins[_plugin] = true;
+    }
+
+    function removePlugin(address _plugin) external onlyGov {
+        plugins[_plugin] = false;
+    }
+
+    function approvePlugin(address _plugin) external {
+        approvedPlugins[msg.sender][_plugin] = true;
+    }
+
+    function denyPlugin(address _plugin) external {
+        approvedPlugins[msg.sender][_plugin] = false;
+    }
+
+    function pluginTransfer(
+        address _token,
+        address _account,
+        address _receiver,
+        uint256 _amount
+    ) external override {
+        _validatePlugin(_account);
+        IERC20(_token).safeTransferFrom(_account, _receiver, _amount);
+    }
+
+    function pluginIncreasePosition(
+        address _account,
+        address _collateralToken,
+        address _indexToken,
+        uint256 _sizeDelta,
+        bool _isLong
+    ) external override {
+        _validatePlugin(_account);
+        IVault(vault).increasePosition(
+            _account,
+            _collateralToken,
+            _indexToken,
+            _sizeDelta,
+            _isLong
+        );
+    }
+
+    function pluginDecreasePosition(
+        address _account,
+        address _collateralToken,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address _receiver
+    ) external override returns (uint256) {
+        _validatePlugin(_account);
+        return
+            IVault(vault).decreasePosition(
+                _account,
+                _collateralToken,
+                _indexToken,
+                _collateralDelta,
+                _sizeDelta,
+                _isLong,
+                _receiver
+            );
+    }
+
+    function directPoolDeposit(address _token, uint256 _amount) external {
+        IERC20(_token).safeTransferFrom(_sender(), vault, _amount);
+        IVault(vault).directPoolDeposit(_token);
+    }
+
+    function swap(
+        address[] memory _path,
+        uint256 _amountIn,
+        uint256 _minOut,
+        address _receiver,
+        bytes calldata signedQuoteData
+    ) public override {
+        swapWithReferrer(
+            _path,
+            _amountIn,
+            _minOut,
+            _receiver,
+            signedQuoteData,
+            address(0)
+        );
+    }
+
+    function swapWithReferrer(
+        address[] memory _path,
+        uint256 _amountIn,
+        uint256 _minOut,
+        address _receiver,
+        bytes calldata signedQuoteData,
+        address referrer
+    ) public override {
+        _setReferral(referrer);
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
+        uint256 amountOut = _swap(_path, _minOut, _receiver, _sender());
+        emit Swap(
+            msg.sender,
+            _path[0],
+            _path[_path.length - 1],
+            _amountIn,
+            amountOut
+        );
+    }
+
+    function swapETHToTokens(
+        address[] memory _path,
+        uint256 _minOut,
+        address _receiver,
+        bytes calldata signedQuoteData
+    ) external payable {
+        swapETHToTokensWithReferrer(
+            _path,
+            _minOut,
+            _receiver,
+            signedQuoteData,
+            address(0)
+        );
+    }
+
+    function swapETHToTokensWithReferrer(
+        address[] memory _path,
+        uint256 _minOut,
+        address _receiver,
+        bytes calldata signedQuoteData,
+        address referrer
+    ) public payable {
+        require(_path[0] == weth, "Router: invalid _path");
+
+        _setReferral(referrer);
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        _transferETHToVault();
+        uint256 amountOut = _swap(_path, _minOut, _receiver, _sender());
+        emit Swap(
+            msg.sender,
+            _path[0],
+            _path[_path.length - 1],
+            msg.value,
+            amountOut
+        );
+    }
+
+    function swapTokensToETH(
+        address[] memory _path,
+        uint256 _amountIn,
+        uint256 _minOut,
+        address payable _receiver,
+        bytes calldata signedQuoteData
+    ) external {
+        swapTokensToETHWithReferrer(
+            _path,
+            _amountIn,
+            _minOut,
+            _receiver,
+            signedQuoteData,
+            address(0)
+        );
+    }
+
+    function swapTokensToETHWithReferrer(
+        address[] memory _path,
+        uint256 _amountIn,
+        uint256 _minOut,
+        address payable _receiver,
+        bytes calldata signedQuoteData,
+        address referrer
+    ) public {
+        require(_path[_path.length - 1] == weth, "Router: invalid _path");
+
+        _setReferral(referrer);
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
+        uint256 amountOut = _swap(_path, _minOut, address(this), _sender());
+        _transferOutETH(amountOut, _receiver);
+
+        emit Swap(
+            msg.sender,
+            _path[0],
+            _path[_path.length - 1],
+            _amountIn,
+            amountOut
+        );
+    }
+
+    function increasePosition(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _amountIn,
+        uint256 _minOut,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _price,
+        bytes calldata signedQuoteData
+    ) external {
+        increasePositionWithReferrer(
+            _path,
+            _indexToken,
+            _amountIn,
+            _minOut,
+            _sizeDelta,
+            _isLong,
+            _price,
+            signedQuoteData,
+            address(0)
+        );
+    }
+
+    function increasePositionWithReferrer(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _amountIn,
+        uint256 _minOut,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _price,
+        bytes calldata signedQuoteData,
+        address referrer
+    ) public {
+        _setReferral(referrer);
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        if (_amountIn > 0) {
+            IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
+        }
+        if (_path.length > 1 && _amountIn > 0) {
+            uint256 amountOut = _swap(_path, _minOut, address(this), _sender());
+            IERC20(_path[_path.length - 1]).safeTransfer(vault, amountOut);
+        }
+        _increasePosition(
+            _path[_path.length - 1],
+            _indexToken,
+            _sizeDelta,
+            _isLong,
+            _price
+        );
+    }
+
+    function increasePositionETH(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _minOut,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _price,
+        bytes calldata signedQuoteData
+    ) external payable {
+        increasePositionETHWithReferrer(
+            _path,
+            _indexToken,
+            _minOut,
+            _sizeDelta,
+            _isLong,
+            _price,
+            signedQuoteData,
+            address(0)
+        );
+    }
+
+    function increasePositionETHWithReferrer(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _minOut,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _price,
+        bytes calldata signedQuoteData,
+        address referrer
+    ) public payable {
+        require(_path[0] == weth, "Router: invalid _path");
+
+        _setReferral(referrer);
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        if (msg.value > 0) {
+            _transferETHToVault();
+        }
+        if (_path.length > 1 && msg.value > 0) {
+            uint256 amountOut = _swap(_path, _minOut, address(this), _sender());
+            IERC20(_path[_path.length - 1]).safeTransfer(vault, amountOut);
+        }
+        _increasePosition(
+            _path[_path.length - 1],
+            _indexToken,
+            _sizeDelta,
+            _isLong,
+            _price
+        );
+    }
+
+    function decreasePosition(
+        address _collateralToken,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address _receiver,
+        uint256 _price,
+        bytes calldata signedQuoteData
+    ) external {
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        _decreasePosition(
+            _collateralToken,
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            _receiver,
+            _price
+        );
+    }
+
+    function decreasePositionETH(
+        address _collateralToken,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address payable _receiver,
+        uint256 _price,
+        bytes calldata signedQuoteData
+    ) external {
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        uint256 amountOut = _decreasePosition(
+            _collateralToken,
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            address(this),
+            _price
+        );
+        _transferOutETH(amountOut, _receiver);
+    }
+
+    function decreasePositionAndSwap(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address _receiver,
+        uint256 _price,
+        uint256 _minOut,
+        bytes calldata signedQuoteData
+    ) public {
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        uint256 amount = _decreasePosition(
+            _path[0],
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            address(this),
+            _price
+        );
+        IERC20(_path[0]).safeTransfer(vault, amount);
+        _swap(_path, _minOut, _receiver, _sender());
+    }
+
+    function decreasePositionAndSwapETH(
+        address[] memory _path,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address payable _receiver,
+        uint256 _price,
+        uint256 _minOut,
+        bytes calldata signedQuoteData
+    ) public {
+        require(_path[_path.length - 1] == weth, "Router: invalid _path");
+
+        IVaultPriceFeed(IVault(vault).priceFeed()).h2sofaApplySignedQuote(
+            signedQuoteData
+        );
+
+        uint256 amount = _decreasePosition(
+            _path[0],
+            _indexToken,
+            _collateralDelta,
+            _sizeDelta,
+            _isLong,
+            address(this),
+            _price
+        );
+        IERC20(_path[0]).safeTransfer(vault, amount);
+        uint256 amountOut = _swap(_path, _minOut, address(this), _sender());
+        _transferOutETH(amountOut, _receiver);
+    }
+
+    function _increasePosition(
+        address _collateralToken,
+        address _indexToken,
+        uint256 _sizeDelta,
+        bool _isLong,
+        uint256 _price
+    ) private {
+        if (_isLong) {
+            require(
+                IVault(vault).getMaxPrice(_indexToken) <= _price,
+                "Router: mark price higher than limit"
+            );
+        } else {
+            require(
+                IVault(vault).getMinPrice(_indexToken) >= _price,
+                "Router: mark price lower than limit"
+            );
+        }
+
+        IVault(vault).increasePosition(
+            _sender(),
+            _collateralToken,
+            _indexToken,
+            _sizeDelta,
+            _isLong
+        );
+    }
+
+    function _decreasePosition(
+        address _collateralToken,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address _receiver,
+        uint256 _price
+    ) private returns (uint256) {
+        if (_isLong) {
+            require(
+                IVault(vault).getMinPrice(_indexToken) >= _price,
+                "Router: mark price lower than limit"
+            );
+        } else {
+            require(
+                IVault(vault).getMaxPrice(_indexToken) <= _price,
+                "Router: mark price higher than limit"
+            );
+        }
+
+        return
+            IVault(vault).decreasePosition(
+                _sender(),
+                _collateralToken,
+                _indexToken,
+                _collateralDelta,
+                _sizeDelta,
+                _isLong,
+                _receiver
+            );
+    }
+
+    function _transferETHToVault() private {
+        IWETH(weth).deposit{value: msg.value}();
+        IERC20(weth).safeTransfer(vault, msg.value);
+    }
+
+    function _transferOutETH(uint256 _amountOut, address payable _receiver)
+        private
+    {
+        IWETH(weth).withdraw(_amountOut);
+        _receiver.sendValue(_amountOut);
+    }
+
+    function _swap(
+        address[] memory _path,
+        uint256 _minOut,
+        address _receiver,
+        address _rebateReceiver
+    ) private returns (uint256) {
+        if (_path.length == 2) {
+            return
+                _vaultSwap(
+                    _path[0],
+                    _path[1],
+                    _minOut,
+                    _receiver,
+                    _rebateReceiver
+                );
+        }
+        if (_path.length == 3) {
+            uint256 midOut = _vaultSwap(
+                _path[0],
+                _path[1],
+                0,
+                address(this),
+                _rebateReceiver
+            );
+            IERC20(_path[1]).safeTransfer(vault, midOut);
+            return
+                _vaultSwap(
+                    _path[1],
+                    _path[2],
+                    _minOut,
+                    _receiver,
+                    _rebateReceiver
+                );
+        }
+
+        revert("Router: invalid _path.length");
+    }
+
+    function _vaultSwap(
+        address _tokenIn,
+        address _tokenOut,
+        uint256 _minOut,
+        address _receiver,
+        address _rebateReceiver
+    ) private returns (uint256) {
+        uint256 amountOut;
+
+        if (_tokenOut == usdg) {
+            // buyUSDG
+            amountOut = IVault(vault).buyUSDG(_tokenIn, _receiver);
+        } else if (_tokenIn == usdg) {
+            // sellUSDG
+            amountOut = IVault(vault).sellUSDG(_tokenOut, _receiver);
+        } else {
+            // swap
+            amountOut = IVault(vault).swapWithRebateReceiver(
+                _tokenIn,
+                _tokenOut,
+                _receiver,
+                _rebateReceiver
+            );
+        }
+
+        require(amountOut >= _minOut, "Router: insufficient amountOut");
+        return amountOut;
+    }
+
+    function _sender() private view returns (address) {
+        return msg.sender;
+    }
+
+    function _validatePlugin(address _account) private view {
+        require(plugins[msg.sender], "Router: invalid plugin");
+        require(
+            approvedPlugins[_account][msg.sender],
+            "Router: plugin not approved"
+        );
+    }
+
+    function _setReferral(address referrer) private {
+        IReferral(referral).setReferral(_sender(), referrer);
+    }
+}
+

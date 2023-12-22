@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: MIT
+
+pragma solidity ^0.8.12;
+
+import "./BaseConstants.sol";
+import "./BasePositionConstants.sol";
+
+contract Constants is BaseConstants, BasePositionConstants {
+    address public constant ZERO_ADDRESS = address(0);
+
+    uint8 public constant ORDER_FILLED = 1;
+
+    uint8 public constant ORDER_NOT_FILLED = 0;
+
+    uint8 public constant STAKING_PID_FOR_CHARGE_FEE = 1;
+
+    uint256 public constant DEFAULT_FUNDING_RATE_FACTOR = 100;
+    
+    uint256 public constant DEFAULT_MAX_OPEN_INTEREST = 10000000000 * PRICE_PRECISION;
+
+    uint256 public constant FUNDING_RATE_PRECISION = BASIS_POINTS_DIVISOR ** 3; // 1e15
+    uint256 public constant MAX_FUNDING_RATE = FUNDING_RATE_PRECISION / 10; // 10% per hour
+
+    uint256 public constant LIQUIDATE_NONE_EXCEED = 0;
+    uint256 public constant LIQUIDATE_FEE_EXCEED = 1;
+    uint256 public constant LIQUIDATE_THRESHOLD_EXCEED = 2;
+    
+    uint256 public constant MAX_DEPOSIT_FEE = 10000; // 10%
+    uint256 public constant MAX_DELTA_TIME = 24 hours;
+    uint256 public constant MAX_FEE_BASIS_POINTS = 5000; // 5%
+    uint256 public constant MAX_FEE_REWARD_BASIS_POINTS = BASIS_POINTS_DIVISOR; // 100%
+    uint256 public constant MAX_FUNDING_RATE_FACTOR = 10000; // 1%
+    uint256 public constant MAX_FUNDING_RATE_INTERVAL = 48 hours;
+    uint256 public constant MAX_LIQUIDATION_FEE_USD = 100 * PRICE_PRECISION; // 100 USD
+    uint256 public constant MAX_STAKING_FEE = 10000; // 10%
+    uint256 public constant MAX_TOKENFARM_COOLDOWN_DURATION = 4 weeks;
+    uint256 public constant MAX_TRIGGER_GAS_FEE = 1e8 gwei;
+    uint256 public constant MAX_VESTING_DURATION = 700 days;
+    uint256 public constant MIN_FUNDING_RATE_INTERVAL = 1 hours;
+    uint256 public constant MIN_LEVERAGE = 10000; // 1x
+    uint256 public constant MIN_FEE_REWARD_BASIS_POINTS = 0;
+
+    uint256 public constant TRAILING_STOP_TYPE_AMOUNT = 0;
+    uint256 public constant TRAILING_STOP_TYPE_PERCENT = 1;
+
+    function checkSlippage(
+        bool isLong,
+        uint256 expectedMarketPrice,
+        uint256 slippageBasisPoints,
+        uint256 actualMarketPrice
+    ) internal pure {
+        if (isLong) {
+            require(
+                actualMarketPrice <=
+                    (expectedMarketPrice * (BASIS_POINTS_DIVISOR + slippageBasisPoints)) / BASIS_POINTS_DIVISOR,
+                "Long position: Check slippage exceeded"
+            );
+        } else {
+            require(
+                (expectedMarketPrice * (BASIS_POINTS_DIVISOR - slippageBasisPoints)) / BASIS_POINTS_DIVISOR <=
+                    actualMarketPrice,
+                "Short position: Check slippage exceeded"
+            );
+        }
+    }
+}

@@ -1,0 +1,94 @@
+//SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.13;
+
+import "./IInstance.sol";
+import "./IMarket.sol";
+import "./UFixed6.sol";
+import "./Account.sol";
+import "./Checkpoint.sol";
+import "./Mapping.sol";
+import "./VaultParameter.sol";
+import "./Registration.sol";
+
+interface IVault is IInstance {
+    struct Context {
+        // parameters
+        UFixed6 settlementFee;
+        uint256 totalWeight;
+
+        // markets
+        uint256 currentId;
+        Registration[] registrations;
+        MarketContext[] markets;
+        Mapping currentIds;
+        Mapping latestIds;
+
+        // state
+        VaultParameter parameter;
+        Checkpoint currentCheckpoint;
+        Checkpoint latestCheckpoint;
+        Account global;
+        Account local;
+    }
+
+    struct MarketContext {
+        // latest global
+        UFixed6 latestPrice;
+
+        // current global
+        UFixed6 currentPosition;
+        UFixed6 currentNet;
+
+        // current local
+        Fixed6 collateral;
+        UFixed6 latestAccountPosition;
+        UFixed6 currentAccountPosition;
+    }
+
+    struct Target {
+        Fixed6 collateral;
+        UFixed6 position;
+    }
+
+    event MarketRegistered(uint256 indexed marketId, IMarket market);
+    event MarketUpdated(uint256 indexed marketId, uint256 newWeight, UFixed6 newLeverage);
+    event ParameterUpdated(VaultParameter newParameter);
+    event Updated(address indexed sender, address indexed account, uint256 version, UFixed6 depositAssets, UFixed6 redeemShares, UFixed6 claimAssets);
+
+    error VaultDepositLimitExceededError();
+    error VaultRedemptionLimitExceededError();
+    error VaultExistingOrderError();
+    error VaultMarketExistsError();
+    error VaultMarketDoesNotExistError();
+    error VaultNotMarketError();
+    error VaultIncorrectAssetError();
+    error VaultNotOperatorError();
+    error VaultNotSingleSidedError();
+    error VaultInsufficientMinimumError();
+
+    error AccountStorageInvalidError();
+    error CheckpointStorageInvalidError();
+    error MappingStorageInvalidError();
+    error RegistrationStorageInvalidError();
+    error VaultParameterStorageInvalidError();
+
+    function initialize(Token18 asset, IMarket initialMaker, UFixed6 cap, string calldata name_) external;
+    function name() external view returns (string memory);
+    function settle(address account) external;
+    function update(address account, UFixed6 depositAssets, UFixed6 redeemShares, UFixed6 claimAssets) external;
+    function asset() external view returns (Token18);
+    function totalAssets() external view returns (Fixed6);
+    function totalShares() external view returns (UFixed6);
+    function convertToShares(UFixed6 assets) external view returns (UFixed6);
+    function convertToAssets(UFixed6 shares) external view returns (UFixed6);
+    function totalMarkets() external view returns (uint256);
+    function parameter() external view returns (VaultParameter memory);
+    function registrations(uint256 marketId) external view returns (Registration memory);
+    function accounts(address account) external view returns (Account memory);
+    function checkpoints(uint256 id) external view returns (Checkpoint memory);
+    function mappings(uint256 id) external view returns (Mapping memory);
+    function register(IMarket market) external;
+    function updateMarket(uint256 marketId, uint256 newWeight, UFixed6 newLeverage) external;
+    function updateParameter(VaultParameter memory newParameter) external;
+}
+

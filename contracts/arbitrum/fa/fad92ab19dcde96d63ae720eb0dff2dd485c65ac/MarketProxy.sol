@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: MPL-2.0
+pragma solidity 0.8.11;
+
+import {TransparentUpgradeableProxy} from "./TransparentUpgradeableProxy.sol";
+
+contract MarketProxy is TransparentUpgradeableProxy {
+	constructor(
+		address _logic,
+		address admin_,
+		bytes memory _data
+	) TransparentUpgradeableProxy(_logic, admin_, _data) {}
+}
+

@@ -1,0 +1,29 @@
+//SPDX-License-Identifier: Unlicense
+pragma solidity =0.7.6;
+pragma abicoder v2;
+
+import "./TidePool.sol";
+import "./FactoryValidator.sol";
+import "./IUniswapV3Factory.sol";
+import "./IUniswapV3Pool.sol";
+
+contract TidePoolFactory {
+    address public immutable uniswapFactory;
+    address public immutable treasury;
+
+    event TidePoolCreated(address indexed tidePool);
+
+    // input a UniswapV3 pool, return a TidePool
+    mapping(address => address) public getTidePool;
+
+    constructor(address _factory, address _treasury) {
+        treasury = _treasury;
+        uniswapFactory = _factory;
+    }
+
+    function deploy(address _pool) external returns (address validatedPool) {
+        validatedPool = FactoryValidator.validate(uniswapFactory, _pool, getTidePool[_pool]);
+        getTidePool[validatedPool] = address(new TidePool(IUniswapV3Pool(validatedPool), treasury));
+        emit TidePoolCreated(getTidePool[validatedPool]);
+    }
+}

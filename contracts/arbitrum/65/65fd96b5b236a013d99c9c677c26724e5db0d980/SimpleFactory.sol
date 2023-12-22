@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-3.0
+
+pragma solidity ^0.8.0;
+
+import "./BoringFactory.sol";
+import "./BoringBatchable.sol";
+
+interface IOwnable {
+    function transferOwnership(address newOwner) external;
+}
+
+contract SimpleFactory is BoringFactory, BoringBatchable {
+    function transferOwnership(address owned, address newOwner) external {
+        IOwnable(owned).transferOwnership(newOwner);
+    }
+
+    function exec(address target, bytes calldata data, uint256 value) external {
+        target.call{value: value}(data);
+    }
+}

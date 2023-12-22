@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+/**
+ * @summary Builds new Pools, logging their addresses and providing `isPool(address) -> (bool)`
+ */
+pragma solidity ^0.8.0;
+
+import "./Pool.sol";
+
+import "./Ownable.sol";
+
+import "./IERC20.sol";
+import "./IFactory.sol";
+import "./IcrpFactory.sol";
+
+import "./MayfairConstants.sol";
+import "./SmartPoolManager.sol";
+
+/**
+ * @title Core Pool Factory
+ */
+contract Factory is IFactoryDef, Ownable {
+    /// CRPFactory contract allowed to create pools
+    IcrpFactory public crpFactory;
+    /// Address of the enforced $MAY token
+    address public override mayToken;
+    /// Minimum amount of $MAY required by the pools
+    uint public override minimumMay;
+    // map of all core pools
+    mapping(address => bool) private _isPool;
+
+    /**
+     * @notice Emitted when the minimum amount of $MAY is changed
+     *
+     * @param caller - Address that changed minimum
+     * @param percentage - the new minimum percentage
+     */
+    event NewMinimum(address indexed caller, uint256 percentage);
+
+    /**
+     * @notice Emitted when the token being enforced is changed
+     *
+     * @param caller - Address that created a pool
+     * @param token - Address of the new token that will be enforced
+     */
+    event NewTokenEnforced(address indexed caller, address token);
+
+    /**
+     * @notice Every new pool gets broadcast of its creation
+     *
+     * @param caller - Address that created a pool
+     * @param pool - Address of new Pool
+     */
+    event LogNewPool(address indexed caller, address indexed pool);
+
+    /**
+     * @notice Create a new Pool with a custom name and symbol
+     *
+     * @param tokenSymbol - A short symbol for the token
+     * @param tokenName - A descriptive name for the token
+     *
+     * @return pool - Address of new Pool contract
+     */
+    function newPool(
+        string memory tokenSymbol,
+        string memory tokenName
+    ) public returns (Pool pool) {
+        // only the governance or the CRP pools can request to create core pools
+        require(
+            msg.sender == this.getController() || crpFactory.isCrp(msg.sender),
+            "ERR_NOT_CONTROLLER"
+        );
+
+        pool = new Pool(tokenSymbol, tokenName);
+        _isPool[address(pool)] = true;
+        emit LogNewPool(msg.sender, address(pool));
+        pool.setExitFeeCollector(msg.sender);
+        pool.setController(msg.sender);
+    }
+
+    /**
+     * @notice Create a new Pool with default name
+     *
+     * @dev This is what a CRPPool calls so it creates an internal unused token
+     *
+     * @return pool - Address of new Pool contract
+     */
+    function newPool()
+        external
+        returns (
+            // solhint-disable-line ordering
+            Pool pool
+        )
+    {
+        return newPool("MIT", "Mayfair Internal Token");
+    }
+
+    /**
+     * @notice Set address of CRPFactory
+     *
+     * @dev This address is used to allow CRPPools to create Pools as well
+     *
+     * @param factoryAddr - Address of the CRPFactory
+     */
+    function setCRPFactory(address factoryAddr) external onlyOwner {
+        IcrpFactory(factoryAddr).isCrp(address(0));
+        crpFactory = IcrpFactory(factoryAddr);
+    }
+
+    /**
+     * @notice Set who's the $MAY token
+     *
+     * @param newAddr - Address of a valid EIP-20 token
+     */
+    function setMayToken(address newAddr) external onlyOwner {
+        SmartPoolManager.verifyTokenCompliance(newAddr);
+        emit NewTokenEnforced(msg.sender, newAddr);
+        mayToken = newAddr;
+    }
+
+    /**
+     * @notice Set the minimum percentage of $MAY a pool needs
+     *
+     * @param percent - how much of $MAY a pool requires
+     */
+    function setMayMinimum(uint percent) external onlyOwner {
+        require(percent < MayfairConstants.ONE, "ERR_NOT_VALID_PERCENTAGE");
+        emit NewMinimum(msg.sender, percent);
+        minimumMay = percent;
+    }
+
+    /**
+     * @notice Check if address is a core Pool
+     *
+     * @param b - Address for checking
+     *
+     * @return Boolean telling if address is a core pool
+     */
+    function isPool(address b) external view returns (bool) {
+        return _isPool[b];
+    }
+}
+

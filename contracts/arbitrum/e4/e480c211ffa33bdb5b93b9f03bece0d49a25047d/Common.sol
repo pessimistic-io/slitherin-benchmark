@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.16;
+import "./IERC20.sol";
+
+interface ITokenMinterMulti is IERC20 {
+  function mint(address, uint256) external;
+
+  function burn(address, uint256) external;
+
+  function updateMinter(address _minter, bool _isActive) external;
+}
+
+interface ITokenMinter {
+  function mint(address, uint256) external;
+
+  function burn(address, uint256) external;
+}
+

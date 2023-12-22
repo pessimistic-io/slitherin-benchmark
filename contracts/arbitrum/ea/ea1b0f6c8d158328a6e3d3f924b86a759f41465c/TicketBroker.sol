@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.9;
+
+import "./MixinContractRegistry.sol";
+import "./MixinReserve.sol";
+import "./MixinTicketBrokerCore.sol";
+import "./MixinTicketProcessor.sol";
+import "./MixinWrappers.sol";
+
+contract TicketBroker is
+    MixinContractRegistry,
+    MixinReserve,
+    MixinTicketBrokerCore,
+    MixinTicketProcessor,
+    MixinWrappers
+{
+    /**
+     * @notice TicketBroker constructor. Only invokes constructor of base Manager contract with provided Controller address
+     * @dev This constructor will not initialize any state variables besides `controller`. The following setter functions
+     * should be used to initialize state variables post-deployment:
+     * - setUnlockPeriod()
+     * - setTicketValidityPeriod()
+     * @param _controller Address of Controller that this contract will be registered with
+     */
+    constructor(address _controller)
+        MixinContractRegistry(_controller)
+        MixinReserve()
+        MixinTicketBrokerCore()
+        MixinTicketProcessor()
+    {}
+
+    /**
+     * @notice Sets unlockPeriod value. Only callable by the Controller owner
+     * @param _unlockPeriod Value for unlockPeriod
+     */
+    function setUnlockPeriod(uint256 _unlockPeriod) external onlyControllerOwner {
+        unlockPeriod = _unlockPeriod;
+
+        emit ParameterUpdate("unlockPeriod");
+    }
+
+    /**
+     * @notice Sets ticketValidityPeriod value. Only callable by the Controller owner
+     * @param _ticketValidityPeriod Value for ticketValidityPeriod
+     */
+    function setTicketValidityPeriod(uint256 _ticketValidityPeriod) external onlyControllerOwner {
+        require(_ticketValidityPeriod > 0, "ticketValidityPeriod must be greater than 0");
+
+        ticketValidityPeriod = _ticketValidityPeriod;
+
+        emit ParameterUpdate("ticketValidityPeriod");
+    }
+}
+

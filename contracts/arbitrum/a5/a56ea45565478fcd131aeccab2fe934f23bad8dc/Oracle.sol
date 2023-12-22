@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+pragma solidity 0.8.17;
+
+import {IUniswapV3Pool} from "./IUniswapV3Pool.sol";
+
+import {TickMath} from "./TickMath.sol";
+
+/// @title Oracle
+/// @notice Provides functions to integrate with V3 pool oracle
+/// @author Aloe Labs, Inc.
+/// @author Modified from Uniswap (https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/OracleLibrary.sol)
+library Oracle {
+    /**
+     * @notice Calculates time-weighted means of tick and liquidity for a given Uniswap V3 pool
+     * @param pool Address of the pool that we want to observe
+     * @param secondsAgo Number of seconds in the past from which to calculate the time-weighted means
+     * @return sqrtMeanPriceX96 The sqrt(geometricMeanPrice) from (block.timestamp - secondsAgo) to block.timestamp
+     * @return secondsPerLiquidityX128 The change in seconds per liquidity from (block.timestamp - secondsAgo)
+     * to block.timestamp
+     * @dev `secondsAgo` MUST NOT be 0
+     */
+    function consult(
+        IUniswapV3Pool pool,
+        uint32 secondsAgo
+    ) internal view returns (uint160 sqrtMeanPriceX96, uint160 secondsPerLiquidityX128) {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = secondsAgo;
+        secondsAgos[1] = 0;
+
+        (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s) = pool.observe(
+            secondsAgos
+        );
+
+        unchecked {
+            int56 tickCumulativesDelta = tickCumulatives[1] - tickCumulatives[0];
+            int24 arithmeticMeanTick = int24(tickCumulativesDelta / int32(secondsAgo));
+            // Always round to negative infinity
+            if (tickCumulativesDelta < 0 && (tickCumulativesDelta % int32(secondsAgo) != 0)) arithmeticMeanTick--;
+
+            sqrtMeanPriceX96 = TickMath.getSqrtRatioAtTick(arithmeticMeanTick);
+            secondsPerLiquidityX128 = secondsPerLiquidityCumulativeX128s[1] - secondsPerLiquidityCumulativeX128s[0];
+        }
+    }
+
+    /**
+     * @notice Given a pool, returns the number of seconds ago of the oldest stored observation
+     * @param pool Address of Uniswap V3 pool that we want to observe
+     * @param observationIndex The observation index from pool.slot0()
+     * @param observationCardinality The observationCardinality from pool.slot0()
+     * @dev (, , uint16 observationIndex, uint16 observationCardinality, , , ) = pool.slot0();
+     * @return secondsAgo The number of seconds ago that the oldest observation was stored
+     */
+    function getMaxSecondsAgo(
+        IUniswapV3Pool pool,
+        uint16 observationIndex,
+        uint16 observationCardinality
+    ) internal view returns (uint32 secondsAgo) {
+        require(observationCardinality != 0, "NI");
+
+        unchecked {
+            (uint32 observationTimestamp, , , bool initialized) = pool.observations(
+                (observationIndex + 1) % observationCardinality
+            );
+
+            // The next index might not be initialized if the cardinality is in the process of increasing
+            // In this case the oldest observation is always in index 0
+            if (!initialized) {
+                (observationTimestamp, , , ) = pool.observations(0);
+            }
+
+            secondsAgo = uint32(block.timestamp) - observationTimestamp;
+        }
+    }
+}
+

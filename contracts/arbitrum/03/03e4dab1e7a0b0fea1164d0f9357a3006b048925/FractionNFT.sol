@@ -1,0 +1,703 @@
+// SPDX-License-Identifier: UNLICENSED
+
+pragma solidity 0.8.13;
+
+import {ERC721H} from "./ERC721H.sol";
+import {NonReentrant} from "./NonReentrant.sol";
+
+import {FractionTreasuryInterface} from "./FractionTreasuryInterface.sol";
+import {HolographERC721Interface} from "./HolographERC721Interface.sol";
+import {HolographerInterface} from "./HolographerInterface.sol";
+import {HolographInterface} from "./HolographInterface.sol";
+import {HolographInterfacesInterface} from "./HolographInterfacesInterface.sol";
+
+import {AddressMintDetails} from "./AddressMintDetails.sol";
+import {CollectionMetadata} from "./CollectionMetadata.sol";
+import {Configuration} from "./Configuration.sol";
+import {DropsInitializer} from "./DropsInitializer.sol";
+import {SaleDetails} from "./SaleDetails.sol";
+import {SalesConfiguration} from "./SalesConfiguration.sol";
+
+import {ERC20} from "./ERC20.sol";
+import {IMetadataRenderer} from "./IMetadataRenderer.sol";
+import {IOperatorFilterRegistry} from "./IOperatorFilterRegistry.sol";
+import {IFractionNFT} from "./IFractionNFT.sol";
+
+import {IByte3IncOnChainServices} from "./IByte3IncOnChainServices.sol";
+
+/**
+ * @dev This contract subscribes to the following HolographERC721 events:
+ *       - beforeSafeTransfer
+ *       - beforeTransfer
+ *       - onIsApprovedForAll
+ *       - customContractURI
+ *
+ *       Do not enable or subscribe to any other events unless you modified your source code for them.
+ */
+contract FractionNFT is NonReentrant, ERC721H, IFractionNFT {
+  /**
+   * CONTRACT VARIABLES
+   * all variables, without custom storage slots, are defined here
+   */
+
+  /**
+   * @dev bytes32(uint256(keccak256('eip1967.FRACT10N.osRegistryEnabled')) - 1)
+   */
+  bytes32 constant _osRegistryEnabledSlot = 0x8ec74fcc7fc5859104d511946d1a5f970ccacfb4cdacb98d34565d3283bef8d3;
+
+  /**
+   * @dev Address of the operator filter registry
+   */
+  IOperatorFilterRegistry public constant openseaOperatorFilterRegistry =
+    IOperatorFilterRegistry(0x000000000000AAeB6D7670E522A718067333cd4E);
+
+  /**
+   * @dev Address of the Byte3IncOnChainServicesProxy
+   */
+  IByte3IncOnChainServices public constant byte3IncOnChainServices =
+    IByte3IncOnChainServices(0xe5345971aFD8FF821589697a28466dBE790af714);
+
+  /**
+   * @dev Internal reference used for minting incremental token ids.
+   */
+  uint224 private _currentTokenId;
+
+  /**
+   * @dev HOLOGRAPH transfer helper address for auto-approval
+   */
+  address public erc721TransferHelper;
+
+  /**
+   * @dev Address of the market filter registry
+   */
+  address public marketFilterAddress;
+
+  /**
+   * @notice Configuration for NFT minting contract storage
+   */
+  Configuration public config;
+
+  /**
+   * @notice Sales configuration
+   */
+  SalesConfiguration public salesConfig;
+
+  /**
+   * @dev Mapping for presale mint counts by address to allow public mint limit
+   */
+  mapping(address => uint256) public totalMintsByAddress;
+
+  /**
+   * @notice The metadata of the collection
+   */
+  CollectionMetadata public collectionMetadata;
+
+  /**
+   * CUSTOM ERRORS
+   */
+
+  /**
+   * @notice Thrown when there is no active market filter address supported for the current chain
+   * @dev Used for enabling and disabling filter for the given chain.
+   */
+  error MarketFilterAddressNotSupportedForChain();
+
+  /**
+   * MODIFIERS
+   */
+
+  /**
+   * @notice Allows user to mint tokens at a quantity
+   */
+  modifier canMintTokens(uint256 quantity) {
+    if (config.editionSize != 0 && quantity + _currentTokenId > config.editionSize) {
+      revert Mint_SoldOut();
+    }
+
+    _;
+  }
+
+  /**
+   * @notice Public sale active
+   */
+  modifier onlyPublicSaleActive() {
+    if (!_publicSaleActive()) {
+      revert Sale_Inactive();
+    }
+
+    _;
+  }
+
+  /**
+   * CONTRACT INITIALIZERS
+   * init function is used instead of constructor
+   */
+
+  /**
+   * @dev Constructor is left empty and init is used instead
+   */
+  constructor() {}
+
+  /**
+   * @notice Used internally to initialize the contract instead of through a constructor
+   * @dev This function is called by the deployer/factory when creating a contract
+   * @param initPayload abi encoded payload to use for contract initilaization
+   */
+  function init(bytes memory initPayload) external override returns (bytes4) {
+    require(!_isInitialized(), "HOLOGRAPH: already initialized");
+
+    (DropsInitializer memory initializer, CollectionMetadata memory metadata) = abi.decode(
+      initPayload,
+      (DropsInitializer, CollectionMetadata)
+    );
+
+    address owner;
+    assembly {
+      owner := sload(_ownerSlot)
+      sstore(_holographerSlot, caller())
+    }
+    if (owner == address(0)) {
+      owner = initializer.initialOwner;
+      assembly {
+        sstore(_ownerSlot, owner)
+      }
+    }
+
+    collectionMetadata = metadata;
+
+    erc721TransferHelper = initializer.erc721TransferHelper;
+    if (initializer.marketFilterAddress != address(0)) {
+      marketFilterAddress = initializer.marketFilterAddress;
+    }
+
+    // Setup config variables
+    config = Configuration({
+      metadataRenderer: IMetadataRenderer(initializer.metadataRenderer),
+      editionSize: initializer.editionSize,
+      royaltyBPS: initializer.royaltyBPS,
+      fundsRecipient: initializer.fundsRecipient
+    });
+
+    salesConfig = initializer.salesConfiguration;
+
+    // TODO: Need to make sure to initialize the metadata renderer
+    if (initializer.metadataRenderer != address(0)) {
+      IMetadataRenderer(initializer.metadataRenderer).initializeWithData(initializer.metadataRendererInit);
+    }
+
+    if (initializer.enableOpenSeaRoyaltyRegistry && _isContract(address(openseaOperatorFilterRegistry))) {
+      if (marketFilterAddress == address(0)) {
+        // this is a default filter that can be used for OS royalty filtering
+        // marketFilterAddress = 0x3cc6CddA760b79bAfa08dF41ECFA224f810dCeB6;
+        // we just register to OS royalties and let OS handle it for us with their default filter contract
+        HolographERC721Interface(holographer()).sourceExternalCall(
+          address(openseaOperatorFilterRegistry),
+          abi.encodeWithSelector(IOperatorFilterRegistry.register.selector, holographer())
+        );
+      } else {
+        // allow user to specify custom filtering contract address
+        HolographERC721Interface(holographer()).sourceExternalCall(
+          address(openseaOperatorFilterRegistry),
+          abi.encodeWithSelector(
+            IOperatorFilterRegistry.registerAndSubscribe.selector,
+            holographer(),
+            marketFilterAddress
+          )
+        );
+      }
+      assembly {
+        sstore(_osRegistryEnabledSlot, true)
+      }
+    }
+
+    setStatus(1);
+
+    return _init(initPayload);
+  }
+
+  /**
+   * PUBLIC NON STATE CHANGING FUNCTIONS
+   * static
+   */
+
+  /**
+   * @notice Returns the version of the contract
+   * @dev Used for contract versioning and validation
+   * @return version string representing the version of the contract
+   */
+  function version() external pure returns (string memory) {
+    return "1.0.0";
+  }
+
+  function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+    return interfaceId == type(IFractionNFT).interfaceId;
+  }
+
+  function isAdmin(address sender) external view returns (bool success) {
+    assembly {
+      success := eq(sender, sload(_ownerSlot))
+    }
+  }
+
+  /**
+   * PUBLIC NON STATE CHANGING FUNCTIONS
+   * dynamic
+   */
+
+  function beforeSafeTransfer(
+    address _from,
+    address /* _to*/,
+    uint256 /* _tokenId*/,
+    bytes calldata /* _data*/
+  ) external view returns (bool) {
+    if (
+      _from != address(0) && // skip on mints
+      _from != msgSender() // skip on transfers from sender
+    ) {
+      bool osRegistryEnabled;
+      assembly {
+        osRegistryEnabled := sload(_osRegistryEnabledSlot)
+      }
+      if (osRegistryEnabled) {
+        try openseaOperatorFilterRegistry.isOperatorAllowed(holographer(), msgSender()) returns (bool allowed) {
+          return allowed;
+        } catch {
+          revert OperatorNotAllowed(msgSender());
+        }
+      }
+    }
+    return true;
+  }
+
+  function beforeTransfer(
+    address _from,
+    address /* _to*/,
+    uint256 /* _tokenId*/,
+    bytes calldata /* _data*/
+  ) external view returns (bool) {
+    if (
+      _from != address(0) && // skip on mints
+      _from != msgSender() // skip on transfers from sender
+    ) {
+      bool osRegistryEnabled;
+      assembly {
+        osRegistryEnabled := sload(_osRegistryEnabledSlot)
+      }
+      if (osRegistryEnabled) {
+        try openseaOperatorFilterRegistry.isOperatorAllowed(holographer(), msgSender()) returns (bool allowed) {
+          return allowed;
+        } catch {
+          revert OperatorNotAllowed(msgSender());
+        }
+      }
+    }
+    return true;
+  }
+
+  function onIsApprovedForAll(address /* _wallet*/, address _operator) external view returns (bool approved) {
+    approved = (erc721TransferHelper != address(0) && _operator == erc721TransferHelper);
+  }
+
+  /**
+   * @notice Sale details
+   * @return SaleDetails sale information details
+   */
+  function saleDetails() external view returns (SaleDetails memory) {
+    return
+      SaleDetails({
+        publicSaleActive: _publicSaleActive(),
+        presaleActive: false,
+        publicSalePrice: salesConfig.publicSalePrice,
+        publicSaleStart: salesConfig.publicSaleStart,
+        publicSaleEnd: salesConfig.publicSaleEnd,
+        presaleStart: salesConfig.presaleStart,
+        presaleEnd: salesConfig.presaleEnd,
+        presaleMerkleRoot: salesConfig.presaleMerkleRoot,
+        totalMinted: _currentTokenId,
+        maxSupply: config.editionSize == 0 ? type(uint256).max : config.editionSize,
+        maxSalePurchasePerAddress: 0
+      });
+  }
+
+  /**
+   * @dev Number of NFTs the user has minted per address
+   * @param minter to get counts for
+   */
+  function mintedPerAddress(address minter) external view returns (AddressMintDetails memory) {
+    return
+      AddressMintDetails({
+        presaleMints: 0,
+        publicMints: totalMintsByAddress[minter],
+        totalMints: totalMintsByAddress[minter]
+      });
+  }
+
+  /**
+   * @notice Contract URI Getter, proxies to HologrpahInterfaces
+   * @return string The URI.
+   */
+  function contractURI() external view returns (string memory) {
+    return
+      IMetadataRenderer(config.metadataRenderer).contractURI(
+        collectionMetadata.name,
+        collectionMetadata.description,
+        collectionMetadata.imageURL,
+        collectionMetadata.externalLink,
+        uint16(config.royaltyBPS),
+        holographer()
+      );
+  }
+
+  function getCollectionMetadata() external view returns (CollectionMetadata memory) {
+    return collectionMetadata;
+  }
+
+  /**
+   * @notice Getter for metadataRenderer contract
+   */
+  function metadataRenderer() external view returns (IMetadataRenderer) {
+    return IMetadataRenderer(config.metadataRenderer);
+  }
+
+  /**
+   * @notice Convert USD price to current price in native Ether
+   */
+  function getNativePrice() external view returns (uint256) {
+    return _usdToWei(salesConfig.publicSalePrice);
+  }
+
+  /**
+   * @notice Returns the name of the token through the holographer entrypoint
+   */
+  function name() external view returns (string memory) {
+    return HolographERC721Interface(holographer()).name();
+  }
+
+  /**
+   * @notice Token URI Getter, proxies to metadataRenderer
+   * @param tokenId id of token to get URI for
+   * @return Token URI
+   */
+  function tokenURI(uint256 tokenId) external view returns (string memory) {
+    HolographERC721Interface H721 = HolographERC721Interface(holographer());
+    require(H721.exists(tokenId), "ERC721: token does not exist");
+
+    return config.metadataRenderer.tokenURI(tokenId);
+  }
+
+  /**
+   * @dev This allows the user to purchase/mint a edition at the given price in the contract.
+   */
+  function purchase(
+    uint256 quantity
+  ) external payable nonReentrant canMintTokens(quantity) onlyPublicSaleActive returns (uint256 firstMintedTokenId) {
+    uint256 value = msg.value;
+    // adjust decimal places
+    uint256 fractionPrice = (salesConfig.publicSalePrice * quantity) * (10 ** (18 - 6));
+    address treasury = fractionTreasury();
+    address payable sender = payable(msgSender());
+    // we first check for FRACT10N token
+    ERC20 fraction = ERC20(fractionToken());
+    // check sender's FRACT10N balance
+    uint256 senderFractionBalance = fraction.balanceOf(sender);
+    // check if balance is enough
+    if (senderFractionBalance < fractionPrice) {
+      // balance too low, purchase additional FRACT10Ns
+      uint256 remainder = byte3IncOnChainServices.purchaseFractionToken{value: value}(
+        sender,
+        ((fractionPrice - senderFractionBalance) / (10 ** (18 - 6)))
+      );
+      // update value to remainder
+      value = remainder;
+    }
+    // get current FractionTreasury balance
+    uint256 treasuryBalance = fraction.balanceOf(treasury);
+    // transfer FRACT10N to FractionTreasury as payment for mint(s)
+    fraction.transferFrom(sender, fractionTreasury(), fractionPrice);
+    // check FractionTreasury balance to ensure succesful transfer
+    require(treasuryBalance + fractionPrice == fraction.balanceOf(treasury), "FRACT10N: transfer failed");
+    // mint NTF(s)
+    _mintNFTs(sender, quantity);
+    // get chain prepend
+    uint256 chainPrepend = HolographERC721Interface(holographer()).sourceGetChainPrepend();
+    // construct first minted token
+    firstMintedTokenId = (chainPrepend + uint256(_currentTokenId - quantity)) + 1;
+    // emit sale event
+    emit Sale({
+      to: sender,
+      quantity: quantity,
+      pricePerToken: salesConfig.publicSalePrice,
+      firstPurchasedTokenId: firstMintedTokenId
+    });
+    // return any native ether if there's leftovers
+    if (value > 0) {
+      sender.transfer(value);
+    }
+  }
+
+  /**
+   * PUBLIC STATE CHANGING FUNCTIONS
+   * admin only
+   */
+
+  function setContractMetadata(CollectionMetadata memory metadata) external onlyOwner {
+    collectionMetadata = metadata;
+  }
+
+  /**
+   * @notice Proxy to update market filter settings in the main registry contracts
+   * @notice Requires admin permissions
+   * @param args Calldata args to pass to the registry
+   */
+  function updateMarketFilterSettings(bytes calldata args) external onlyOwner {
+    HolographERC721Interface(holographer()).sourceExternalCall(address(openseaOperatorFilterRegistry), args);
+    bool osRegistryEnabled = openseaOperatorFilterRegistry.isRegistered(holographer());
+    assembly {
+      sstore(_osRegistryEnabledSlot, osRegistryEnabled)
+    }
+  }
+
+  /**
+   * @notice Manage subscription for marketplace filtering based off royalty payouts.
+   * @param enable Enable filtering to non-royalty payout marketplaces
+   */
+  function manageMarketFilterSubscription(bool enable) external onlyOwner {
+    address self = holographer();
+    if (marketFilterAddress == address(0)) {
+      revert MarketFilterAddressNotSupportedForChain();
+    }
+    if (!openseaOperatorFilterRegistry.isRegistered(self) && enable) {
+      HolographERC721Interface(self).sourceExternalCall(
+        address(openseaOperatorFilterRegistry),
+        abi.encodeWithSelector(IOperatorFilterRegistry.registerAndSubscribe.selector, self, marketFilterAddress)
+      );
+    } else if (enable) {
+      HolographERC721Interface(self).sourceExternalCall(
+        address(openseaOperatorFilterRegistry),
+        abi.encodeWithSelector(IOperatorFilterRegistry.subscribe.selector, self, marketFilterAddress)
+      );
+    } else {
+      HolographERC721Interface(self).sourceExternalCall(
+        address(openseaOperatorFilterRegistry),
+        abi.encodeWithSelector(IOperatorFilterRegistry.unsubscribe.selector, self, false)
+      );
+      HolographERC721Interface(self).sourceExternalCall(
+        address(openseaOperatorFilterRegistry),
+        abi.encodeWithSelector(IOperatorFilterRegistry.unregister.selector, self)
+      );
+    }
+    bool osRegistryEnabled = openseaOperatorFilterRegistry.isRegistered(self);
+    assembly {
+      sstore(_osRegistryEnabledSlot, osRegistryEnabled)
+    }
+  }
+
+  function modifyMarketFilterAddress(address newMarketFilterAddress) external onlyOwner {
+    marketFilterAddress = newMarketFilterAddress;
+  }
+
+  /**
+   * @notice Admin mint tokens to a recipient for free
+   * @param recipient recipient to mint to
+   * @param quantity quantity to mint
+   */
+  function adminMint(address recipient, uint256 quantity) external onlyOwner canMintTokens(quantity) returns (uint256) {
+    _mintNFTs(recipient, quantity);
+
+    return _currentTokenId;
+  }
+
+  /**
+   * @dev Mints multiple editions to the given list of addresses.
+   * @param recipients list of addresses to send the newly minted editions to
+   */
+  function adminMintAirdrop(
+    address[] calldata recipients
+  ) external onlyOwner canMintTokens(recipients.length) returns (uint256) {
+    unchecked {
+      for (uint256 i = 0; i < recipients.length; i++) {
+        _mintNFTs(recipients[i], 1);
+      }
+    }
+
+    return _currentTokenId;
+  }
+
+  /**
+   * @notice Set a new metadata renderer
+   * @param newRenderer new renderer address to use
+   * @param setupRenderer data to setup new renderer with
+   */
+  function setMetadataRenderer(IMetadataRenderer newRenderer, bytes memory setupRenderer) external onlyOwner {
+    config.metadataRenderer = newRenderer;
+
+    if (setupRenderer.length > 0) {
+      newRenderer.initializeWithData(setupRenderer);
+    }
+
+    emit UpdatedMetadataRenderer({sender: msgSender(), renderer: newRenderer});
+  }
+
+  /**
+   * @dev This sets the sales configuration
+   * @param publicSalePrice New public sale price
+   * @dev maxSalePurchasePerAddress = Max # of purchases (public) per address allowed
+   * @param publicSaleStart unix timestamp when the public sale starts
+   * @param publicSaleEnd unix timestamp when the public sale ends (set to 0 to disable)
+   * @param presaleStart unix timestamp when the presale starts
+   * @param presaleEnd unix timestamp when the presale ends
+   * @param presaleMerkleRoot merkle root for the presale information
+   */
+  function setSaleConfiguration(
+    uint104 publicSalePrice,
+    uint32 /* maxSalePurchasePerAddress */,
+    uint64 publicSaleStart,
+    uint64 publicSaleEnd,
+    uint64 presaleStart,
+    uint64 presaleEnd,
+    bytes32 presaleMerkleRoot
+  ) external onlyOwner {
+    salesConfig.publicSalePrice = publicSalePrice;
+    salesConfig.maxSalePurchasePerAddress = 0;
+    salesConfig.publicSaleStart = publicSaleStart;
+    salesConfig.publicSaleEnd = publicSaleEnd;
+    salesConfig.presaleStart = presaleStart;
+    salesConfig.presaleEnd = presaleEnd;
+    salesConfig.presaleMerkleRoot = presaleMerkleRoot;
+
+    emit SalesConfigChanged(msgSender());
+  }
+
+  /**
+   * @notice Set a different funds recipient
+   * @param newRecipientAddress new funds recipient address
+   */
+  function setFundsRecipient(address payable newRecipientAddress) external onlyOwner {
+    require(newRecipientAddress != address(0), "Funds Recipient cannot be 0 address");
+    config.fundsRecipient = newRecipientAddress;
+    emit FundsRecipientChanged(newRecipientAddress, msgSender());
+  }
+
+  /**
+   * @notice This withdraws ETH from the contract to the contract owner.
+   */
+  function withdraw() external override nonReentrant {
+    require(config.fundsRecipient != address(0), "Funds Recipient address not set");
+    address sender = msgSender();
+
+    // Get fee amount
+    uint256 funds = address(this).balance;
+    address payable feeRecipient = payable(
+      HolographInterface(HolographerInterface(holographer()).getHolograph()).getTreasury()
+    );
+    // for now set it to 0 since there is no fee
+    uint256 holographFee = 0;
+
+    // Check if withdraw is allowed for sender
+    if (sender != config.fundsRecipient && sender != _getOwner() && sender != feeRecipient) {
+      revert Access_WithdrawNotAllowed();
+    }
+
+    // Payout HOLOGRAPH fee
+    if (holographFee > 0) {
+      (bool successFee, ) = feeRecipient.call{value: holographFee, gas: 210_000}("");
+      if (!successFee) {
+        revert Withdraw_FundsSendFailure();
+      }
+      funds -= holographFee;
+    }
+
+    // Payout recipient
+    (bool successFunds, ) = config.fundsRecipient.call{value: funds, gas: 210_000}("");
+    if (!successFunds) {
+      revert Withdraw_FundsSendFailure();
+    }
+
+    // Emit event for indexing
+    emit FundsWithdrawn(sender, config.fundsRecipient, funds, feeRecipient, holographFee);
+  }
+
+  /**
+   * @notice Admin function to finalize an open edition sale
+   */
+  function finalizeOpenEdition() external onlyOwner {
+    if (config.editionSize != 0) {
+      revert Admin_UnableToFinalizeNotOpenEdition();
+    }
+
+    config.editionSize = uint64(_currentTokenId);
+    emit OpenMintFinalized(msgSender(), config.editionSize);
+  }
+
+  /**
+   * INTERNAL FUNCTIONS
+   * non state changing
+   */
+
+  function _isContract(address contractAddress) private view returns (bool) {
+    bytes32 codehash;
+    assembly {
+      codehash := extcodehash(contractAddress)
+    }
+    return (codehash != 0x0 && codehash != 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470);
+  }
+
+  function _publicSaleActive() internal view returns (bool) {
+    return salesConfig.publicSaleStart <= block.timestamp && salesConfig.publicSaleEnd > block.timestamp;
+  }
+
+  function _usdToWei(uint256 amount) internal view returns (uint256 weiAmount) {
+    if (amount == 0) {
+      return 0;
+    }
+    weiAmount = byte3IncOnChainServices.convertUsdToWei(amount);
+  }
+
+  /**
+   * INTERNAL FUNCTIONS
+   * state changing
+   */
+
+  function _mintNFTs(address recipient, uint256 quantity) internal {
+    HolographERC721Interface H721 = HolographERC721Interface(holographer());
+    uint256 chainPrepend = H721.sourceGetChainPrepend();
+    uint224 tokenId = 0;
+    for (uint256 i = 0; i < quantity; i++) {
+      _currentTokenId += 1;
+      while (
+        H721.exists(chainPrepend + uint256(_currentTokenId)) || H721.burned(chainPrepend + uint256(_currentTokenId))
+      ) {
+        _currentTokenId += 1;
+      }
+      tokenId = _currentTokenId;
+      H721.sourceMint(recipient, tokenId);
+      // uint256 id = chainPrepend + uint256(tokenId);
+    }
+  }
+
+  fallback() external payable override {
+    assembly {
+      // Allocate memory for the error message
+      let errorMsg := mload(0x40)
+      // update memory pointer
+      mstore(0x40, add(errorMsg, 0x20))
+      // Error message: "Function not found", properly padded with zeroes
+      mstore(errorMsg, 0x46756e6374696f6e206e6f7420666f756e640000000000000000000000000000)
+      // Revert with the error message
+      revert(errorMsg, 0x12) // 0x12 == 18 bytes is the length of errorMsg
+    }
+  }
+
+  // patch to get Holograph Indexer to identify this as a drop contract
+  function getHolographDropERC721Source() external view returns (address) {
+    address fractionTreasury;
+    assembly {
+      /**
+       * @dev bytes32(uint256(keccak256('eip1967.FRACT10N.treasury')) - 1)
+       */
+      fractionTreasury := sload(0x1136b6b83da8d61ba4fa1d68b5ef128602c708583193e4c55add5660847fff03)
+    }
+    return FractionTreasuryInterface(fractionTreasury).getSourceERC721();
+  }
+}
+

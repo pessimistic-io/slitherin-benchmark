@@ -1,0 +1,663 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+// Inheritance
+import "./OwnedWithInit.sol";
+import "./ISportPositionalMarket.sol";
+import "./ITherundownConsumer.sol";
+import "./ISportsAMM.sol";
+import "./ISportPositionalMarketFactory.sol";
+
+// Libraries
+import "./SafeMath.sol";
+
+// Internal references
+import "./SportPositionalMarketManager.sol";
+import "./SportPosition.sol";
+import "./IERC20.sol";
+
+contract SportPositionalMarket is OwnedWithInit, ISportPositionalMarket {
+    /* ========== LIBRARIES ========== */
+
+    using SafeMath for uint;
+
+    /* ========== TYPES ========== */
+
+    struct Options {
+        SportPosition home;
+        SportPosition away;
+        SportPosition draw;
+    }
+
+    struct Times {
+        uint maturity;
+        uint expiry;
+    }
+
+    struct GameDetails {
+        bytes32 gameId;
+        string gameLabel;
+    }
+
+    struct SportPositionalMarketParameters {
+        address owner;
+        address creator;
+        bytes32 gameId;
+        string gameLabel;
+        uint[2] times; // [maturity, expiry]
+        uint positionCount;
+        address[] positions;
+        uint[] tags;
+        bool isChild;
+        address parentMarket;
+        bool isDoubleChance;
+        address factory;
+    }
+
+    /* ========== STATE VARIABLES ========== */
+
+    Options public options;
+    uint public override optionsCount;
+    Times public parentTimes;
+    GameDetails private gameDetails;
+    string private childGameLabel;
+    uint[] public override tags;
+    uint public finalResult;
+
+    // `deposited` tracks the sum of all deposits.
+    // This must explicitly be kept, in case tokens are transferred to the contract directly.
+    uint public override deposited;
+    address public override creator;
+    bool public override resolved;
+    bool public override cancelled;
+    uint public cancelTimestamp;
+    uint public homeOddsOnCancellation;
+    uint public awayOddsOnCancellation;
+    uint public drawOddsOnCancellation;
+
+    bool public invalidOdds;
+    bool public initialized = false;
+    bool public override paused;
+    bool public override isChild;
+    ISportPositionalMarket public override parentMarket;
+
+    bool public override isDoubleChance;
+    bool public override optionsInitialized;
+    address public factory;
+
+    /* ========== CONSTRUCTOR ========== */
+    function initialize(SportPositionalMarketParameters calldata _parameters) external {
+        require(!initialized, "Positional Market already initialized");
+        initialized = true;
+        initOwner(_parameters.owner);
+
+        optionsCount = _parameters.positionCount;
+        require(optionsCount == _parameters.positions.length, "Position count mismatch");
+
+        creator = _parameters.creator;
+        if (_parameters.isChild || _parameters.isDoubleChance) {
+            isChild = _parameters.isChild;
+            isDoubleChance = _parameters.isDoubleChance;
+            parentMarket = ISportPositionalMarket(_parameters.parentMarket);
+            childGameLabel = _parameters.gameLabel;
+        } else {
+            parentTimes = Times(_parameters.times[0], _parameters.times[1]);
+            gameDetails = GameDetails(_parameters.gameId, _parameters.gameLabel);
+        }
+
+        tags = _parameters.tags;
+        factory = _parameters.factory;
+    }
+
+    /* ---------- External Contracts ---------- */
+
+    function _manager() internal view returns (SportPositionalMarketManager) {
+        return SportPositionalMarketManager(owner);
+    }
+
+    /* ---------- Phases ---------- */
+
+    function _times() internal view returns (Times memory) {
+        if (isChild || isDoubleChance) {
+            (uint maturity, uint expiry) = parentMarket.times();
+            return Times(maturity, expiry);
+        }
+        return parentTimes;
+    }
+
+    function _matured() internal view returns (bool) {
+        return _times().maturity < block.timestamp;
+    }
+
+    function _expired() internal view returns (bool) {
+        return resolved && (_times().expiry < block.timestamp || deposited == 0);
+    }
+
+    function _isPaused() internal view returns (bool) {
+        return isDoubleChance ? parentMarket.paused() : paused;
+    }
+
+    function getTags() external view override returns (uint tag1, uint tag2) {
+        if (tags.length > 1) {
+            tag1 = tags[0];
+            tag2 = tags[1];
+        } else {
+            tag1 = tags[0];
+        }
+    }
+
+    function getTagsLength() external view override returns (uint tagsLength) {
+        return tags.length;
+    }
+
+    function times() external view override returns (uint maturity, uint destruction) {
+        Times memory time = _times();
+        return (time.maturity, time.expiry);
+    }
+
+    function phase() external view override returns (Phase) {
+        if (!_matured()) {
+            return Phase.Trading;
+        }
+        if (!_expired()) {
+            return Phase.Maturity;
+        }
+        return Phase.Expiry;
+    }
+
+    function setPaused(bool _paused) external override onlyOwner managerNotPaused {
+        require(paused != _paused, "State not changed");
+        paused = _paused;
+        emit PauseUpdated(_paused);
+    }
+
+    function updateDates(uint256 _maturity, uint256 _expiry) external override onlyOwner managerNotPaused noDoubleChance {
+        require(_maturity > block.timestamp, "Maturity must be in a future");
+        if (!isChild) {
+            parentTimes = Times(_maturity, _expiry);
+        }
+        emit DatesUpdated(_maturity, _expiry);
+    }
+
+    /* ---------- Market Resolution ---------- */
+
+    function canResolve() public view override returns (bool) {
+        return !resolved && _matured() && !paused;
+    }
+
+    function getGameDetails() external view override returns (bytes32 gameId, string memory gameLabel) {
+        return (_getDetails().gameId, _getDetails().gameLabel);
+    }
+
+    function getParentMarketPositionsUint() public view override returns (uint position1, uint position2) {
+        if (isDoubleChance) {
+            (IPosition home, , ) = parentMarket.getOptions();
+            if (_hasNotBeenInitialized(home)) {
+                if (
+                    keccak256(abi.encodePacked(_getDetails().gameLabel)) == keccak256(abi.encodePacked("HomeTeamNotToLose"))
+                ) {
+                    (position1, position2) = (0, 2);
+                } else if (
+                    keccak256(abi.encodePacked(_getDetails().gameLabel)) == keccak256(abi.encodePacked("AwayTeamNotToLose"))
+                ) {
+                    (position1, position2) = (1, 2);
+                } else {
+                    (position1, position2) = (0, 1);
+                }
+            }
+        }
+    }
+
+    function getParentMarketPositions() public view override returns (IPosition position1, IPosition position2) {
+        if (isDoubleChance) {
+            (IPosition home, IPosition away, IPosition draw) = parentMarket.getOptions();
+            if (keccak256(abi.encodePacked(_getDetails().gameLabel)) == keccak256(abi.encodePacked("HomeTeamNotToLose"))) {
+                (position1, position2) = (home, draw);
+            } else if (
+                keccak256(abi.encodePacked(_getDetails().gameLabel)) == keccak256(abi.encodePacked("AwayTeamNotToLose"))
+            ) {
+                (position1, position2) = (away, draw);
+            } else {
+                (position1, position2) = (home, away);
+            }
+        }
+    }
+
+    function _result() internal view returns (Side) {
+        if (!resolved || cancelled) {
+            return Side.Cancelled;
+        } else if (finalResult == 3 && optionsCount > 2) {
+            return Side.Draw;
+        } else {
+            return finalResult == 1 ? Side.Home : Side.Away;
+        }
+    }
+
+    function result() external view override returns (Side) {
+        return _result();
+    }
+
+    /* ---------- Option Balances and Mints ---------- */
+    function getGameId() external view override returns (bytes32) {
+        return _getDetails().gameId;
+    }
+
+    function getStampedOdds()
+        public
+        view
+        override
+        returns (
+            uint,
+            uint,
+            uint
+        )
+    {
+        if (cancelled) {
+            if (isDoubleChance) {
+                (uint position1Odds, uint position2Odds) = _getParentPositionOdds();
+
+                return (position1Odds + position2Odds, 0, 0);
+            }
+            return (homeOddsOnCancellation, awayOddsOnCancellation, drawOddsOnCancellation);
+        } else {
+            return (0, 0, 0);
+        }
+    }
+
+    function _getParentPositionOdds() internal view returns (uint odds1, uint odds2) {
+        (uint homeOddsParent, uint awayOddsParent, uint drawOddsParent) = parentMarket.getStampedOdds();
+        (IPosition position1, IPosition position2) = getParentMarketPositions();
+        (IPosition home, IPosition away, ) = parentMarket.getOptions();
+
+        if (_hasNotBeenInitialized(home)) {
+            return (0, 0);
+        }
+
+        odds1 = position1 == home ? homeOddsParent : position1 == away ? awayOddsParent : drawOddsParent;
+        odds2 = position2 == home ? homeOddsParent : position2 == away ? awayOddsParent : drawOddsParent;
+    }
+
+    function _balancesOf(address account)
+        internal
+        view
+        returns (
+            uint home,
+            uint away,
+            uint draw
+        )
+    {
+        if (!optionsInitialized) {
+            return (0, 0, 0);
+        }
+        if (optionsCount > 2) {
+            return (
+                options.home.getBalanceOf(account),
+                options.away.getBalanceOf(account),
+                options.draw.getBalanceOf(account)
+            );
+        }
+        return (options.home.getBalanceOf(account), options.away.getBalanceOf(account), 0);
+    }
+
+    function balancesOf(address account)
+        external
+        view
+        override
+        returns (
+            uint home,
+            uint away,
+            uint draw
+        )
+    {
+        return _balancesOf(account);
+    }
+
+    function totalSupplies()
+        external
+        view
+        override
+        returns (
+            uint home,
+            uint away,
+            uint draw
+        )
+    {
+        if (optionsCount > 2) {
+            return (options.home.totalSupply(), options.away.totalSupply(), options.draw.totalSupply());
+        }
+        return (options.home.totalSupply(), options.away.totalSupply(), 0);
+    }
+
+    function getOptions()
+        external
+        view
+        override
+        returns (
+            IPosition home,
+            IPosition away,
+            IPosition draw
+        )
+    {
+        home = options.home;
+        away = options.away;
+        draw = options.draw;
+    }
+
+    function _getMaximumBurnable(address account) internal view returns (uint amount) {
+        (uint homeBalance, uint awayBalance, uint drawBalance) = _balancesOf(account);
+        uint min = homeBalance;
+        if (min > awayBalance) {
+            min = awayBalance;
+            if (optionsCount > 2 && drawBalance < min) {
+                min = drawBalance;
+            }
+        } else {
+            if (optionsCount > 2 && drawBalance < min) {
+                min = drawBalance;
+            }
+        }
+        return min;
+    }
+
+    function _getDetails() internal view returns (GameDetails memory) {
+        if (isChild || isDoubleChance) {
+            (bytes32 gameId, ) = parentMarket.getGameDetails();
+            return GameDetails(gameId, childGameLabel);
+        }
+        return gameDetails;
+    }
+
+    /* ---------- Utilities ---------- */
+
+    function _incrementDeposited(uint value) internal returns (uint _deposited) {
+        _deposited = deposited.add(value);
+        deposited = _deposited;
+        _manager().incrementTotalDeposited(value);
+    }
+
+    function _decrementDeposited(uint value) internal returns (uint _deposited) {
+        _deposited = deposited.sub(value);
+        deposited = _deposited;
+        _manager().decrementTotalDeposited(value);
+    }
+
+    function _requireManagerNotPaused() internal view {
+        require(!_manager().paused(), "This action cannot be performed while the contract is paused");
+    }
+
+    function requireUnpaused() external view {
+        _requireManagerNotPaused();
+    }
+
+    /* ========== MUTATIVE FUNCTIONS ========== */
+
+    /* ---------- Minting ---------- */
+
+    function mint(uint value) external override {
+        require(!_matured() && !_isPaused(), "Minting inactive");
+        require(msg.sender == ISportPositionalMarketFactory(factory).sportsAMM(), "Invalid minter");
+        if (value == 0) {
+            return;
+        }
+
+        _mint(msg.sender, value);
+
+        if (!isDoubleChance) {
+            _incrementDeposited(value);
+            _manager().transferSusdTo(msg.sender, address(this), value);
+        }
+    }
+
+    function _mint(address minter, uint amount) internal {
+        if (!optionsInitialized) {
+            _initializeOptions();
+        }
+        if (isDoubleChance) {
+            options.home.mint(minter, amount);
+            emit Mint(Side.Home, minter, amount);
+        } else {
+            options.home.mint(minter, amount);
+            options.away.mint(minter, amount);
+            emit Mint(Side.Home, minter, amount);
+            emit Mint(Side.Away, minter, amount);
+            if (optionsCount > 2) {
+                options.draw.mint(minter, amount);
+                emit Mint(Side.Draw, minter, amount);
+            }
+        }
+    }
+
+    function _initializeOptions() internal {
+        address[] memory positions = new address[](optionsCount);
+        for (uint i = 0; i < optionsCount; i++) {
+            positions[i] = address(SportPosition(Clones.clone(ISportPositionalMarketFactory(factory).positionMastercopy())));
+        }
+
+        // Instantiate the options themselves
+        options.home = SportPosition(positions[0]);
+        options.away = SportPosition(positions[1]);
+        if (isChild) {
+            require(tags.length > 1, "Child markets must have more then one tag");
+            if (tags[1] == 10001) {
+                options.home.initialize(_getDetails().gameLabel, "HOME", ISportPositionalMarketFactory(factory).sportsAMM());
+                options.away.initialize(_getDetails().gameLabel, "AWAY", ISportPositionalMarketFactory(factory).sportsAMM());
+            } else if (tags[1] == 10002 || tags[1] == 10010) {
+                options.home.initialize(_getDetails().gameLabel, "OVER", ISportPositionalMarketFactory(factory).sportsAMM());
+                options.away.initialize(
+                    _getDetails().gameLabel,
+                    "UNDER",
+                    ISportPositionalMarketFactory(factory).sportsAMM()
+                );
+            }
+        } else {
+            options.home.initialize(_getDetails().gameLabel, "HOME", ISportPositionalMarketFactory(factory).sportsAMM());
+            options.away.initialize(_getDetails().gameLabel, "AWAY", ISportPositionalMarketFactory(factory).sportsAMM());
+        }
+
+        if (optionsCount > 2) {
+            options.draw = SportPosition(positions[2]);
+            options.draw.initialize(_getDetails().gameLabel, "DRAW", ISportPositionalMarketFactory(factory).sportsAMM());
+        }
+        optionsInitialized = true;
+        emit PositionsInitialized(
+            address(this),
+            address(options.home),
+            address(options.away),
+            optionsCount > 2 ? address(options.draw) : address(0)
+        );
+    }
+
+    function _hasNotBeenInitialized(IPosition home) internal view returns (bool) {
+        return address(home) == address(0);
+    }
+
+    /* ---------- Market Resolution ---------- */
+
+    function resolve(uint _outcome) external onlyOwner managerNotPaused {
+        require(_outcome <= optionsCount, "Invalid outcome");
+        if (_outcome == 0) {
+            cancelled = true;
+            cancelTimestamp = block.timestamp;
+            if (!isDoubleChance) {
+                stampOdds();
+            }
+        } else {
+            require(canResolve(), "Can not resolve market");
+        }
+        finalResult = _outcome;
+        resolved = true;
+        emit MarketResolved(_result(), deposited, 0, 0);
+    }
+
+    function stampOdds() internal {
+        uint[] memory odds = new uint[](optionsCount);
+        odds = ITherundownConsumer(creator).getNormalizedOddsForMarket(address(this));
+        if (odds[0] == 0 || odds[1] == 0) {
+            invalidOdds = true;
+        }
+        homeOddsOnCancellation = odds[0];
+        awayOddsOnCancellation = odds[1];
+        drawOddsOnCancellation = optionsCount > 2 ? odds[2] : 0;
+        emit StoredOddsOnCancellation(homeOddsOnCancellation, awayOddsOnCancellation, drawOddsOnCancellation);
+    }
+
+    /* ---------- Claiming and Exercising Options ---------- */
+
+    function exerciseOptions() external override {
+        // The market must be resolved if it has not been.
+        require(resolved, "Unresolved");
+        require(!_isPaused(), "Paused");
+        // If the account holds no options, revert.
+        (uint homeBalance, uint awayBalance, uint drawBalance) = _balancesOf(msg.sender);
+        require(homeBalance != 0 || awayBalance != 0 || drawBalance != 0, "Nothing to exercise");
+
+        if (isDoubleChance && _canExerciseParentOptions()) {
+            parentMarket.exerciseOptions();
+        }
+        // Each option only needs to be exercised if the account holds any of it.
+        if (homeBalance != 0) {
+            options.home.exercise(msg.sender);
+        }
+        if (awayBalance != 0) {
+            options.away.exercise(msg.sender);
+        }
+        if (drawBalance != 0) {
+            options.draw.exercise(msg.sender);
+        }
+        uint payout = _getPayout(homeBalance, awayBalance, drawBalance);
+
+        if (cancelled) {
+            require(
+                block.timestamp > cancelTimestamp.add(_manager().cancelTimeout()) && !invalidOdds,
+                "Unexpired timeout/ invalid odds"
+            );
+            payout = calculatePayoutOnCancellation(homeBalance, awayBalance, drawBalance);
+        }
+        emit OptionsExercised(msg.sender, payout);
+        if (payout != 0) {
+            if (!isDoubleChance) {
+                _decrementDeposited(payout);
+            }
+            payout = _manager().transformCollateral(payout);
+            ISportsAMM(ISportPositionalMarketFactory(factory).sportsAMM()).sUSD().transfer(msg.sender, payout);
+        }
+    }
+
+    function _canExerciseParentOptions() internal view returns (bool) {
+        if (!parentMarket.resolved() && !parentMarket.canResolve()) {
+            return false;
+        }
+
+        (uint homeBalance, uint awayBalance, uint drawBalance) = parentMarket.balancesOf(address(this));
+
+        if (homeBalance == 0 && awayBalance == 0 && drawBalance == 0) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function _getPayout(
+        uint homeBalance,
+        uint awayBalance,
+        uint drawBalance
+    ) internal view returns (uint payout) {
+        if (isDoubleChance) {
+            if (_result() == Side.Home) {
+                payout = homeBalance;
+            }
+        } else {
+            payout = (_result() == Side.Home) ? homeBalance : awayBalance;
+
+            if (optionsCount > 2 && _result() != Side.Home) {
+                payout = _result() == Side.Away ? awayBalance : drawBalance;
+            }
+        }
+    }
+
+    function restoreInvalidOdds(
+        uint _homeOdds,
+        uint _awayOdds,
+        uint _drawOdds
+    ) external override onlyOwner {
+        require(_homeOdds > 0 && _awayOdds > 0, "Invalid odd");
+        homeOddsOnCancellation = _homeOdds;
+        awayOddsOnCancellation = _awayOdds;
+        drawOddsOnCancellation = optionsCount > 2 ? _drawOdds : 0;
+        invalidOdds = false;
+        emit StoredOddsOnCancellation(homeOddsOnCancellation, awayOddsOnCancellation, drawOddsOnCancellation);
+    }
+
+    function calculatePayoutOnCancellation(
+        uint _homeBalance,
+        uint _awayBalance,
+        uint _drawBalance
+    ) public view returns (uint payout) {
+        if (!cancelled) {
+            return 0;
+        } else {
+            if (isDoubleChance) {
+                (uint position1Odds, uint position2Odds) = _getParentPositionOdds();
+                payout = _homeBalance.mul(position1Odds).div(1e18);
+                payout = payout.add(_homeBalance.mul(position2Odds).div(1e18));
+            } else {
+                payout = _homeBalance.mul(homeOddsOnCancellation).div(1e18);
+                payout = payout.add(_awayBalance.mul(awayOddsOnCancellation).div(1e18));
+                payout = payout.add(_drawBalance.mul(drawOddsOnCancellation).div(1e18));
+            }
+        }
+    }
+
+    /* ---------- Market Expiry ---------- */
+
+    function _selfDestruct(address payable beneficiary) internal {
+        uint _deposited = deposited;
+        if (_deposited != 0) {
+            _decrementDeposited(_deposited);
+        }
+
+        // Transfer the balance rather than the deposit value in case there are any synths left over
+        // from direct transfers.
+        uint balance = ISportsAMM(ISportPositionalMarketFactory(factory).sportsAMM()).sUSD().balanceOf(address(this));
+        if (balance != 0) {
+            ISportsAMM(ISportPositionalMarketFactory(factory).sportsAMM()).sUSD().transfer(beneficiary, balance);
+        }
+
+        // Destroy the option tokens before destroying the market itself.
+        options.home.expire(beneficiary);
+        options.away.expire(beneficiary);
+        selfdestruct(beneficiary);
+    }
+
+    function expire(address payable beneficiary) external onlyOwner {
+        require(_expired(), "Unexpired options remaining");
+        emit Expired(beneficiary);
+        _selfDestruct(beneficiary);
+    }
+
+    /* ========== MODIFIERS ========== */
+
+    modifier managerNotPaused() {
+        _requireManagerNotPaused();
+        _;
+    }
+
+    modifier noDoubleChance() {
+        require(!isDoubleChance, "Not supported for double chance markets");
+        _;
+    }
+
+    /* ========== EVENTS ========== */
+
+    event Mint(Side side, address indexed account, uint value);
+    event MarketResolved(Side result, uint deposited, uint poolFees, uint creatorFees);
+
+    event OptionsExercised(address indexed account, uint value);
+    event OptionsBurned(address indexed account, uint value);
+    event Expired(address beneficiary);
+    event StoredOddsOnCancellation(uint homeOdds, uint awayOdds, uint drawOdds);
+    event PauseUpdated(bool _paused);
+    event DatesUpdated(uint256 _maturity, uint256 _expiry);
+    event PositionsInitialized(address _market, address _home, address _away, address _draw);
+}
+

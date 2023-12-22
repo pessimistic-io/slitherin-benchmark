@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity 0.8.15;
+
+import "./IGLPManager.sol";
+import "./Errors.sol";
+
+import { TokenUtils } from "./TokenUtils.sol";
+
+contract Oracle {
+	address public immutable glp;
+
+	address public immutable manager;
+
+	constructor(address _glp, address _manager) {
+		glp = _glp;
+		manager = _manager;
+	}
+
+	function getPrice(uint256 _amount) external view returns (uint256) {
+		uint256 _aum = IGLPManager(manager).getAumInUsdg(false);
+		uint256 _glpSupply = TokenUtils.safeTotalSupply(glp);
+		uint256 _price = (_aum * _amount) / _glpSupply;
+
+		return _price;
+	}
+
+	function decimals() external pure returns (uint8) {
+		return 18;
+	}
+}
+

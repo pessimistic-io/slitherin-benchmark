@@ -1,0 +1,561 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.19;
+
+import "./OwnableUpgradeable.sol";
+import "./SafeERC20Upgradeable.sol";
+import "./PausableUpgradeable.sol";
+import "./MathUpgradeable.sol";
+import "./ReentrancyGuardUpgradeable.sol";
+import "./IDepositCallbackReceiver.sol";
+import "./IWithdrawalCallbackReceiver.sol";
+
+import "./Deposit.sol";
+import "./Withdrawal.sol";
+import "./EventUtils.sol";
+import "./IOracle.sol";
+
+import "./console.sol";
+
+interface AggregatorV3Interface {
+    function decimals() external view returns (uint8);
+
+    function description() external view returns (string memory);
+
+    function version() external view returns (uint256);
+
+    function getRoundData(
+        uint80 _roundId
+    )
+        external
+        view
+        returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+
+    function latestRoundData()
+        external
+        view
+        returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+}
+
+interface ISwapRouter {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24 fee;
+        address recipient;
+        uint deadline;
+        uint amountIn;
+        uint amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+
+    /// @notice Swaps amountIn of one token for as much as possible of another token
+    /// @param params The parameters necessary for the swap, encoded as ExactInputSingleParams in calldata
+    /// @return amountOut The amount of the received token
+    function exactInputSingle(
+        ExactInputSingleParams calldata params
+    ) external payable returns (uint amountOut);
+
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint deadline;
+        uint amountIn;
+        uint amountOutMinimum;
+    }
+
+    /// @notice Swaps amountIn of one token for as much as possible of another along the specified path
+    /// @param params The parameters necessary for the multi-hop swap, encoded as ExactInputParams in calldata
+    /// @return amountOut The amount of the received token
+    function exactInput(
+        ExactInputParams calldata params
+    ) external payable returns (uint amountOut);
+}
+
+interface IWater {
+    function lend(uint256 _amount) external returns (bool);
+
+    function repayDebt(uint256 leverage, uint256 debtValue) external;
+
+    function getTotalDebt() external view returns (uint256);
+
+    function updateTotalDebt(uint256 profit) external returns (uint256);
+
+    function totalAssets() external view returns (uint256);
+
+    function totalDebt() external view returns (uint256);
+
+    function balanceOfUSDC() external view returns (uint256);
+}
+
+interface IVodkaV2 {
+    struct DepositRecord {
+        address user;
+        uint256 depositedAmount;
+        uint256 leverageAmount;
+        uint256 receivedMarketTokens;
+        uint256 feesPaid;
+        bool success;
+        uint16 leverageMultiplier;
+        address longToken;
+    }
+
+    struct WithdrawRecord {
+        address user;
+        uint256 gmTokenWithdrawnAmount;
+        uint256 returnedUSDC;
+        uint256 feesPaid;
+        uint256 profits;
+        uint256 positionID;
+        uint256 fullDebtValue;
+        bool success;
+        bool isLiquidation;
+        address longToken;
+    }
+
+    struct GMXPoolAddresses {
+        address longToken;
+        address shortToken;
+        address marketToken;
+        address indexToken;
+    }
+
+    function getStrategyAddresses() external view returns (address[10] memory);
+
+    function fulfillOpenPosition(
+        bytes32 key,
+        uint256 _receivedTokens
+    ) external returns (bool);
+
+    function fulfillClosePosition(
+        bytes32 key,
+        uint256 _receivedUSDC
+    ) external returns (bool);
+
+    function fulfillLiquidation(
+        bytes32 _key,
+        uint256 _returnedUSDC
+    ) external returns (bool);
+
+    function depositRecord(
+        bytes32 key
+    ) external view returns (DepositRecord memory);
+
+    function withdrawRecord(
+        bytes32 key
+    ) external view returns (WithdrawRecord memory);
+
+    function gmxPoolAddresses(
+        address longToken
+    ) external view returns (GMXPoolAddresses memory);
+}
+
+contract VodkaV2GMXHandler is
+    IDepositCallbackReceiver,
+    IWithdrawalCallbackReceiver,
+    OwnableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    PausableUpgradeable
+{
+    using SafeERC20Upgradeable for IERC20Upgradeable;
+    using MathUpgradeable for uint256;
+    using MathUpgradeable for uint128;
+
+    struct StrategyAddresses {
+        address USDC;
+        address WaterContract;
+        address VodkaV2;
+        address univ3Router;
+        address dataStore;
+        address oracle;
+        address reader;
+        address depositHandler;
+        address withdrawalHandler;
+    }
+
+    struct OrderRefunded {
+        uint256 feesRefunded;
+        uint256 amountRefunded;
+        uint256 amountRepaid;
+        uint256 gmTokensRefunded;
+        uint256 depositOrWithdrawal; //0 deposit //1 withdrawal
+        bool cancelled;
+    }
+
+    StrategyAddresses public strategyAddresses;
+
+    mapping(bytes32 => OrderRefunded) public orderRefunded;
+    mapping(address => bytes32[]) public userRefunds;
+    mapping(address => address) public chainlinkOracle;
+
+    address public tempPayableAddress;
+
+    struct Data {
+        int256 marketTokenPrice;
+        bytes32 factorType;
+        bool maximize;
+    }
+
+    uint256[50] private __gaps;
+
+    modifier zeroAddress(address addr) {
+        require(addr != address(0), "Zero address");
+        _;
+    }
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
+        address _USDC,
+        address _WaterContract,
+        address _VodkaV2
+    ) external initializer {
+        strategyAddresses.VodkaV2 = _VodkaV2;
+        strategyAddresses.WaterContract = _WaterContract;
+        strategyAddresses.USDC = _USDC;
+
+        __Ownable_init();
+        __Pausable_init();
+        __ReentrancyGuard_init();
+    }
+
+    /** ----------- Change onlyOwner functions ------------- */
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    //function to set all variables setStrategyParams
+    function setStrategyParams(
+        address _univ3Router,
+        address _dataStore,
+        address _oracle,
+        address _reader,
+        address _depositHandler,
+        address _withdrawalHandler
+    ) external onlyOwner {
+        strategyAddresses.univ3Router = _univ3Router;
+        strategyAddresses.dataStore = _dataStore;
+        strategyAddresses.oracle = _oracle;
+        strategyAddresses.reader = _reader;
+        strategyAddresses.depositHandler = _depositHandler;
+        strategyAddresses.withdrawalHandler = _withdrawalHandler;
+        //emit an event
+    }
+
+    function setChainlinkOracleForAsset(
+        address _token,
+        address _oracle
+    ) external onlyOwner {
+        require(_token != address(0), "Zero address");
+        chainlinkOracle[_token] = _oracle;
+    }
+
+    function getLatestData(address _token) public view returns (uint256) {
+        // prettier-ignore
+        (
+            /* uint80 roundID */,
+            int answer,
+            /*uint startedAt*/,
+            /*uint timeStamp*/,
+            /*uint80 answeredInRound*/
+        ) =  AggregatorV3Interface(chainlinkOracle[_token]).latestRoundData(); //in 1e8
+        console.log("uint256(answer)", uint256(answer));
+
+        uint256 decimalPrice;
+        if (_token == strategyAddresses.USDC) {
+            decimalPrice = uint256(answer) * 1e10 * 1e6;
+        } else {
+            decimalPrice = (uint256(answer) * 1e10) / 1e6;
+        }
+
+        return decimalPrice;
+    }
+
+    function getDepositRecord(
+        bytes32 key
+    ) public view returns (IVodkaV2.DepositRecord memory) {
+        return IVodkaV2(strategyAddresses.VodkaV2).depositRecord(key);
+    }
+
+    function getWithdrawRecord(
+        bytes32 key
+    ) public view returns (IVodkaV2.WithdrawRecord memory) {
+        return IVodkaV2(strategyAddresses.VodkaV2).withdrawRecord(key);
+    }
+
+    function getMarketTokenPrice(
+        address longToken,
+        bytes32 pnlFactorType,
+        bool maximize
+    ) public view returns (int256, uint256, uint256, uint256) {
+        IVodkaV2.GMXPoolAddresses memory gmp = IVodkaV2(
+            strategyAddresses.VodkaV2
+        ).gmxPoolAddresses(longToken);
+        Data memory data;
+        Market.Props memory market = Market.Props({
+            marketToken: gmp.marketToken,
+            indexToken: gmp.indexToken,
+            longToken: gmp.longToken,
+            shortToken: gmp.shortToken
+        });
+        data.factorType = pnlFactorType;
+        data.maximize = maximize;
+
+        Price.Props memory indexTokenPrice = IOracle(strategyAddresses.oracle)
+            .getPrimaryPrice(gmp.indexToken);
+
+        Price.Props memory longTokenPrice = IOracle(strategyAddresses.oracle)
+            .getPrimaryPrice(gmp.longToken);
+
+        Price.Props memory shortTokenPrice = IOracle(strategyAddresses.oracle)
+            .getPrimaryPrice(gmp.shortToken);
+
+        (data.marketTokenPrice, ) = IReader(strategyAddresses.reader)
+            .getMarketTokenPrice(
+                strategyAddresses.dataStore,
+                market,
+                indexTokenPrice,
+                longTokenPrice,
+                shortTokenPrice,
+                data.factorType,
+                data.maximize
+            );
+
+        data.marketTokenPrice = data.marketTokenPrice / 1e12;
+
+        return (
+            data.marketTokenPrice,
+            uint256(indexTokenPrice.max),
+            uint256(longTokenPrice.max),
+            uint256(shortTokenPrice.max)
+        );
+    }
+
+    function getEstimatedMarketTokenPrice(
+        address longToken
+    ) public view returns (int256, uint256, uint256, uint256) {
+        IVodkaV2.GMXPoolAddresses memory gmp = IVodkaV2(
+            strategyAddresses.VodkaV2
+        ).gmxPoolAddresses(longToken);
+        Market.Props memory market = Market.Props({
+            marketToken: gmp.marketToken,
+            indexToken: gmp.indexToken,
+            longToken: gmp.longToken,
+            shortToken: gmp.shortToken
+        });
+
+        Price.Props memory indexTokenPrice = Price.Props({
+            max: uint256(getLatestData(gmp.indexToken)),
+            min: uint256(getLatestData(gmp.indexToken))
+        });
+
+        uint256 index = uint256(getLatestData(gmp.indexToken));
+        console.log("index", index);
+
+        Price.Props memory longTokenPrice = Price.Props({
+            //prettier ignore
+            max: uint256(getLatestData(longToken)),
+            min: uint256(getLatestData(longToken))
+        });
+
+        uint256 long = uint256(getLatestData(longToken));
+        console.log("long", long);
+
+        Price.Props memory shortTokenPrice = Price.Props({
+            max: uint256(getLatestData(strategyAddresses.USDC)),
+            min: uint256(getLatestData(strategyAddresses.USDC))
+        });
+
+        uint256 usdc = uint256(getLatestData(strategyAddresses.USDC));
+        console.log("usdc", usdc);
+
+        (int256 marketTokenPrice, ) = IReader(strategyAddresses.reader)
+            .getMarketTokenPrice(
+                strategyAddresses.dataStore,
+                market,
+                indexTokenPrice,
+                longTokenPrice,
+                shortTokenPrice,
+                keccak256("MAX_PNL_FACTOR_FOR_WITHDRAWALS"),
+                false
+            );
+
+        marketTokenPrice = marketTokenPrice / 1e12;
+        uint256 mp = uint256(marketTokenPrice);
+        console.log("marketTokenPrice", mp);
+
+        return (
+            marketTokenPrice,
+            indexTokenPrice.max,
+            longTokenPrice.max,
+            shortTokenPrice.max
+        );
+    }
+
+    function takeAll(address _inputSsset) public onlyOwner {
+        uint256 balance = IERC20Upgradeable(_inputSsset).balanceOf(
+            address(this)
+        );
+        IERC20Upgradeable(_inputSsset).transfer(msg.sender, balance);
+    }
+
+    function setTempPayableAddress(address _tempPayableAddress) public {
+        require(msg.sender == strategyAddresses.VodkaV2, "Not VodkaV2");
+        tempPayableAddress = _tempPayableAddress;
+    }
+
+    /** -----GMX callback functions */
+    function afterDepositExecution(
+        bytes32 key,
+        Deposit.Props memory deposit,
+        EventUtils.EventLogData memory eventData
+    ) external {
+        require(
+            msg.sender == strategyAddresses.depositHandler,
+            "Not deposit handler"
+        );
+        IVodkaV2(strategyAddresses.VodkaV2).fulfillOpenPosition(
+            key,
+            eventData.uintItems.items[0].value
+        );
+    }
+
+    // @dev called after a deposit cancellation
+    // @param key the key of the deposit
+    // @param deposit the deposit that was cancelled
+    function afterDepositCancellation(
+        bytes32 key,
+        Deposit.Props memory deposit,
+        EventUtils.EventLogData memory eventData
+    ) external {
+        require(
+            msg.sender == strategyAddresses.depositHandler,
+            "Not deposit handler"
+        );
+
+        IVodkaV2.DepositRecord memory dr = getDepositRecord(key);
+        OrderRefunded storage or = orderRefunded[key];
+
+        IERC20Upgradeable(strategyAddresses.USDC).safeTransfer(
+            dr.user,
+            dr.depositedAmount
+        );
+        IERC20Upgradeable(strategyAddresses.USDC).safeIncreaseAllowance(
+            strategyAddresses.WaterContract,
+            dr.leverageAmount
+        );
+        IWater(strategyAddresses.WaterContract).repayDebt(
+            dr.leverageAmount,
+            dr.leverageAmount
+        );
+
+        payable(dr.user).transfer(eventData.uintItems.items[0].value);
+
+        or.feesRefunded = eventData.uintItems.items[0].value;
+        or.amountRefunded = dr.depositedAmount;
+        or.amountRepaid = dr.leverageAmount;
+        or.cancelled = true;
+        or.depositOrWithdrawal = 0;
+
+        userRefunds[dr.user].push(key);
+    }
+
+    function afterWithdrawalExecution(
+        bytes32 key,
+        Withdrawal.Props memory withdrawal,
+        EventUtils.EventLogData memory eventData
+    ) external {
+        require(
+            msg.sender == strategyAddresses.withdrawalHandler,
+            "Not withdrawal handler"
+        );
+
+        uint256 longAmountFromGMX = eventData.uintItems.items[0].value;
+        uint256 usdcAmountFromGMX = eventData.uintItems.items[1].value;
+
+        IVodkaV2.WithdrawRecord memory wr = getWithdrawRecord(key);
+        IERC20Upgradeable(wr.longToken).approve(
+            address(strategyAddresses.univ3Router),
+            longAmountFromGMX
+        );
+
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter
+            .ExactInputSingleParams({
+                tokenIn: wr.longToken,
+                tokenOut: strategyAddresses.USDC,
+                fee: 3000,
+                recipient: address(this),
+                deadline: block.timestamp,
+                amountIn: longAmountFromGMX,
+                //@todo have access to the oracle in gmx, can utilize that to get the price?
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            });
+
+        uint256 amountOut = ISwapRouter(strategyAddresses.univ3Router)
+            .exactInputSingle(params);
+
+        uint256 totalUSDC = usdcAmountFromGMX + amountOut;
+        IERC20Upgradeable(strategyAddresses.USDC).safeTransfer(
+            strategyAddresses.VodkaV2,
+            totalUSDC
+        );
+
+        wr.isLiquidation
+            ? IVodkaV2(strategyAddresses.VodkaV2).fulfillLiquidation(
+                key,
+                totalUSDC
+            )
+            : IVodkaV2(strategyAddresses.VodkaV2).fulfillClosePosition(
+                key,
+                totalUSDC
+            );
+    }
+
+    // @dev called after a withdrawal cancellation
+    // @param key the key of the withdrawal
+    // @param withdrawal the withdrawal that was cancelled
+    function afterWithdrawalCancellation(
+        bytes32 key,
+        Withdrawal.Props memory withdrawal,
+        EventUtils.EventLogData memory eventData
+    ) external {
+        require(
+            msg.sender == strategyAddresses.withdrawalHandler,
+            "Not withdrawal handler"
+        );
+        IVodkaV2.WithdrawRecord memory wr = getWithdrawRecord(key);
+        OrderRefunded storage or = orderRefunded[key];
+
+        payable(wr.user).transfer(eventData.uintItems.items[0].value);
+
+        or.feesRefunded = eventData.uintItems.items[0].value;
+        or.gmTokensRefunded = wr.gmTokenWithdrawnAmount;
+        or.cancelled = true;
+        or.depositOrWithdrawal = 1;
+
+        userRefunds[wr.user].push(key);
+    }
+
+    receive() external payable {}
+}
+

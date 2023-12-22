@@ -1,0 +1,33 @@
+pragma solidity >=0.8.9;
+
+import "./IERC20.sol";
+interface ICallDataExecutor {
+    function execute(
+        IERC20 token,
+        address addr,
+        address approveAddress,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes memory payload
+    ) external payable;
+
+    function sendNativeAndExecute(
+        IERC20 token,
+        address callTo,
+        address approveAddress,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes memory payload
+    ) external payable;
+
+    function sendAndExecute(
+        IERC20 token,
+        address callTo,
+        address approveAddress,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes memory payload
+    ) external payable;
+}
+
+

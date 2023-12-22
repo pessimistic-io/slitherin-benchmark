@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: UNLICENSED
+
+pragma solidity ^0.6.12;
+
+interface IVesting {
+    function withdrawTokens() external;
+
+    function tokensClaimable(address _user) external view returns (uint256 claimableAmount);
+    function tokensLockable(address _user) external view returns (uint256 lockableAmount);
+}
+
