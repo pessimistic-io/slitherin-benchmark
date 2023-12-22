@@ -12,8 +12,6 @@ jobs:
         steps:
             - name: Checkout repository
               uses: actions/checkout@v4
-              with:
-                ref: 'bench_params'
             - name: Set up Python
               uses: actions/setup-python@v4
               with:
