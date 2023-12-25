@@ -64,7 +64,7 @@ def get_address(filename):
     if m:
         return "0x"+m.group(1)
 
-Contract = namedtuple('Contract', 'filename,compiler')
+Contract = namedtuple('Contract', 'address,filename,compiler')
 
 def get_contracts(dir_name, limit = None, solc_ver = None):
     i = 0
@@ -74,7 +74,10 @@ def get_contracts(dir_name, limit = None, solc_ver = None):
                 return
             contract_info = json.loads(line)
             i += 1
-            yield Contract(os.path.join(dir_name, contract_info["address"][2:4], contract_info["address"][2:]), os.path.join(SOLC_DIR, contract_info["compiler"]))
+            yield Contract(
+                contract_info["address"],
+                os.path.join(dir_name, contract_info["address"][2:4], contract_info["address"][2:]), 
+                os.path.join(SOLC_DIR, contract_info["compiler"]))
 
 if __name__ == "__main__":
     folder_path = os.path.join("..", "detectors")

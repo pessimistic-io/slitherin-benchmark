@@ -1,5 +1,4 @@
 import os
-import json
 import time
 import subprocess
 import logging
@@ -11,23 +10,16 @@ from datetime import timedelta
 from functools import partial
 
 from utils import extract_detectors, get_contracts, Contract
+from analyzer import slither_analyzer, SlitherOutError
 DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
 
-def slitherAnalyzer(output):
-    # Return a dictionary with detector names as keys and True/False as values
-    result = {}
-    if len(output)<6:
-        return {'empty output': True}
-    output = json.loads(output, strict=False)
-        
-    if output['success'] and 'results' in output and 'detectors' in output['results']:
-        for detector_result in output['results']['detectors']:          
-            result[detector_result['check']] = True
-    else:
-        return {'error': True}
-    return result
-
-def process_file(contract: Contract, detectors: list = None):
+def process_file(contract: Contract, detectors: list = None) -> tuple[Contract, dict[str, list]]:
+    """Run subproccess contract processing
+    Args:
+        contract: contract to analyze.
+    Returns:
+        Contract, detector name, list of findings.
+    """
     if detectors is None:
         detectors = ['--pess']
     else:
@@ -46,44 +38,54 @@ def process_file(contract: Contract, detectors: list = None):
         # Process the output using slitherAnalyzer function
         try:
             slitherin_out = result.stdout.split('\n')[0]
-            detector_results = slitherAnalyzer(slitherin_out)
+            detector_results = slither_analyzer(slitherin_out)
+        except SlitherOutError as e:
+            logger.error("SlitherOutError(%s) during command: %s" % (e.args[0], " ".join(command)))
+            return contract, {'error': []} #TODO decide if we need e.args[0] message?
         except Exception as e:
-            logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d out=_%s_", filename, result.stdout, len(result.stdout), len(slitherin_out), result.stdout)
-            return contract.filename, {"failed": True}
+            logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d out=_%s_", contract.filename, result.stdout, len(result.stdout), len(slitherin_out), result.stdout)
+            return contract, {"error": []}
         # Return filename and detector results
-        return contract.filename, detector_results
+        return contract, detector_results
     except subprocess.CalledProcessError as e:
         # Handle any errors that occur during slitherin execution
         logger.error("%s returned %s: %s", e.returncode, contract.filename, e.output)
-        return contract.filename, {'error': True}
+        return contract, {'error': []}
 
 
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
+@click.option('-eo', '--extra_output', help="file to save extra results(address, detector name, lines)", default=None)
 @click.option('-i', '--input', help="directory with contracts")
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(d[1] for d in DETECTORS), default=None, type=str)
-@click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=None, type=int)
-def main(output, input, timeout, limit, detect, pool):
+@click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=os.cpu_count(), type=int)
+def main(output, extra_output, input, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     logger.addHandler(handler)
     
     # Use multiprocessing Pool to run slitherin in parallel
-    pool_number = pool if pool is not None else os.cpu_count()
-    logger.info("starting pool on %d cores", pool_number)
+    logger.info("starting pool on %d cores", pool)
     detector_statistics = Counter()
     start_time = time.time()
-    with Pool(pool_number) as pool:
-        for _, detector_results in pool.imap(partial(process_file, detectors=detect), get_contracts(input)):
+    if extra_output is not None:
+        extra_result_lines = []
+    else:
+        extra_result_lines = None
+    with Pool(pool) as pool:
+        for contract, detector_results in pool.imap(partial(process_file, detectors=detect), get_contracts(input)):
             detector_statistics['total'] += 1
-            for detector, found in detector_results.items():
-                if found:
-                    detector_statistics[detector] += 1
+            for detector, findings in detector_results.items():
+                detector_statistics[detector] += 1
+                if extra_output is not None:
+                    for finding in findings:
+                        with open(extra_output, 'a+') as f_extra:
+                            f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
             if limit is not None and detector_statistics['total'] >= limit:
                 logger.info("limit stop, processed %d tasks", detector_statistics['total'])
                 break
@@ -96,7 +98,7 @@ def main(output, input, timeout, limit, detect, pool):
     if output is not None:
         logger.info("Save stats to file %s", output)
         with open(output, 'w') as f:
-            f.write(df.to_csv())    	
+            f.write(df.to_csv(sep=';'))    	
     
 if __name__ == "__main__":
     main()
