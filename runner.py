@@ -40,7 +40,7 @@ def process_file(contract: Contract, detectors: list = None) -> tuple[Contract, 
             slitherin_out = result.stdout.split('\n')[0]
             detector_results = slither_analyzer(slitherin_out)
         except SlitherOutError as e:
-            logger.exception(SlitherOutError)
+            logger.error("SlitherOutError(%s) during command: %s" % (e.args[0], " ".join(command)))
             return contract, {'error': []} #TODO decide if we need e.args[0] message?
         except Exception as e:
             logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d out=_%s_", contract.filename, result.stdout, len(result.stdout), len(slitherin_out), result.stdout)
