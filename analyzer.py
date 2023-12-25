@@ -27,6 +27,6 @@ def slither_analyzer(output:str) -> dict[list[Finding]]:
                 address = f"0x{path[-40:]}"
                 findings.append(Finding(address, fname, ",".join([str(l) for l in element['source_mapping']['lines']])))
             result[detector_result['check']] = findings
-    else:
+    elif not 'results' in output:
         raise SlitherOutError('no results')
     return result
