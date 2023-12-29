@@ -7,4 +7,3 @@ API_KEY_BY_CHAIN = {
     '0xA4B1': '', #arbitrum
 }
 ETHERSCAN_QUERY_LIMIT = 5
-DB_NAME = 'contracts.db'

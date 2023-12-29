@@ -1,7 +1,7 @@
 import sqlite3
 from threading import Lock
 
-from config import DB_NAME
+DB_NAME = 'contracts.db'
 
 def sync (lock):
     def function (f):
