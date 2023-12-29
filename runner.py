@@ -63,7 +63,7 @@ def main(output, extra_output, input, new_contracts, new_detectors, timeout, lim
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     logger.addHandler(handler)
     # Check params
     if detect is not None:
