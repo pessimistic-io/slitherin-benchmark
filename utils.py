@@ -5,6 +5,8 @@ import json
 
 from collections import namedtuple
 
+from storage import Storage
+
 SOLC_DIR = "solc-bin"
 
 class AbstractDetector:
@@ -64,20 +66,34 @@ def get_address(filename):
     if m:
         return "0x"+m.group(1)
 
-Contract = namedtuple('Contract', 'address,filename,compiler')
+Contract = namedtuple('Contract', 'address,chain_id,filename,compiler,detectors')
+DETECTORS = [d[1] for d in extract_detectors(os.path.join("..", "slitherin", "detectors"))]
 
-def get_contracts(dir_name, limit = None, solc_ver = None):
+def get_contracts(dir_name, detectors, new_contracts = False, new_detectors = False, limit = None):
+    #connect db if need
+    storage = Storage()
     i = 0
     with open(os.path.join(dir_name, "contracts.json")) as f:
         for line in f:
-            if limit is not None and i>=limit:
-                return
             contract_info = json.loads(line)
+            if new_contracts or new_detectors:
+                detectors_checked = storage.get_contract_detectors(contract_info["address"], contract_info["chain_id"])
+            if new_contracts and len(detectors_checked) > 0:
+                continue #skip contracts checked by any detector
+            if new_detectors:
+                detectors_to_check = [d for d in detectors if d not in detectors_checked]
+            else:
+                detectors_to_check = detectors
+            if len(detectors_to_check) == 0:
+                continue
             i += 1
+            if limit is not None and i > limit:
+                return
             yield Contract(
-                contract_info["address"],
+                contract_info["address"], contract_info["chain_id"],
                 os.path.join(dir_name, contract_info["address"][2:4], contract_info["address"][2:]), 
-                os.path.join(SOLC_DIR, contract_info["compiler"]))
+                os.path.join(SOLC_DIR, contract_info["compiler"]),
+                detectors_to_check)
 
 if __name__ == "__main__":
     folder_path = os.path.join("..", "detectors")
