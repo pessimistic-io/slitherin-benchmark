@@ -7,28 +7,23 @@ from collections import Counter
 import pandas as pd
 import click
 from datetime import timedelta
-from functools import partial
 
-from utils import extract_detectors, get_contracts, Contract
+from utils import DETECTORS, get_contracts, Contract
 from analyzer import slither_analyzer, SlitherOutError
-DETECTORS = extract_detectors(os.path.join("..", "slitherin", "detectors"))
+from storage import Storage
 
-def process_file(contract: Contract, detectors: list = None) -> tuple[Contract, dict[str, list]]:
+def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
     Args:
         contract: contract to analyze.
     Returns:
         Contract, detector name, list of findings.
     """
-    if detectors is None:
-        detectors = ['--pess']
-    else:
-        detectors = ['--detect', '.'.join(detectors)]
     try:
         # Run slitherin command and capture output
         # slitherin --pess tests/multiple_storage_read_test.sol --json -
         logger = logging.getLogger()
-        command = ['slitherin', '--pess', contract.filename, '--json', '-']
+        command = ['slitherin', '--detect', ','.join(contract.detectors), contract.filename, '--json', '-']
         if contract.compiler is not None:
             command.append("--solc")
             command.append(contract.compiler)
@@ -55,30 +50,34 @@ def process_file(contract: Contract, detectors: list = None) -> tuple[Contract, 
 
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
-@click.option('-eo', '--extra_output', help="file to save extra results(address, detector name, lines)", default=None)
+@click.option('-eo', '--extra-output', help="file to save extra results(address, detector name, lines)", default=None)
 @click.option('-i', '--input', help="directory with contracts")
+@click.option('-nc', '--new-contracts', is_flag=True, default=False, help="check only unchecked contracts.")
+@click.option('-nd', '--new-detectors', is_flag=True, default=False, help="check contracts only with unchecked detectors.")
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
-@click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(d[1] for d in DETECTORS), default=None, type=str)
+@click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(DETECTORS), default=None, type=str)
 @click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=os.cpu_count(), type=int)
-def main(output, extra_output, input, timeout, limit, detect, pool):
+def main(output, extra_output, input, new_contracts, new_detectors, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.addHandler(handler)
-    
+    # Check params
+    if detect is not None:
+        detectors = detect.split(',')
+    else:
+        detectors = DETECTORS
     # Use multiprocessing Pool to run slitherin in parallel
-    logger.info("starting pool on %d cores", pool)
+    logger.info("starting pool on %d cores contract limit %d", pool, limit)
     detector_statistics = Counter()
     start_time = time.time()
-    if extra_output is not None:
-        extra_result_lines = []
-    else:
-        extra_result_lines = None
+    storage = Storage()
     with Pool(pool) as pool:
-        for contract, detector_results in pool.imap(partial(process_file, detectors=detect), get_contracts(input)):
+        for contract, detector_results in pool.imap(
+            process_file, get_contracts(input, detectors, new_contracts, new_detectors, limit)):
             detector_statistics['total'] += 1
             for detector, findings in detector_results.items():
                 detector_statistics[detector] += 1
@@ -86,9 +85,9 @@ def main(output, extra_output, input, timeout, limit, detect, pool):
                     for finding in findings:
                         with open(extra_output, 'a+') as f_extra:
                             f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
-            if limit is not None and detector_statistics['total'] >= limit:
-                logger.info("limit stop, processed %d tasks", detector_statistics['total'])
-                break
+            for detector in contract.detectors:
+                storage.set_contract_checked(contract.address, contract.chain_id, detector)
+                
             if timeout is not None and time.time() - start_time > timeout:
                 logger.info("timeout stop, processed %d tasks", detector_statistics['total'])
                 break

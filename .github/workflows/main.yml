@@ -22,8 +22,6 @@ jobs:
                 node-version: '18.x'
             - name: Update pip
               run: python -m pip install --upgrade pip
-            - name: Install solc-select
-              run: python -m pip install solc-select
             - name: Install Slither
               run: python -m pip install slither-analyzer
             - name: Install Setuptools
@@ -33,7 +31,7 @@ jobs:
             - name: Install benchmark requirements
               run: python -m pip install -r requirements.txt
             - name: Run Benchmark
-              run: python3 runner.py -i contracts/mainnet -l 100 --extra_output extra_out.csv
+              run: python3 runner.py -i contracts/mainnet -l 100 --extra-output extra_out.csv
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
@@ -54,8 +52,6 @@ jobs:
                 node-version: '18.x'
             - name: Update pip
               run: python -m pip install --upgrade pip
-            - name: Install solc-select
-              run: python -m pip install solc-select
             - name: Install Slither
               run: python -m pip install slither-analyzer
             - name: Install Setuptools
@@ -65,7 +61,7 @@ jobs:
             - name: Install benchmark requirements
               run: python -m pip install -r requirements.txt
             - name: Run Benchmark
-              run: python3 runner.py -i contracts/arbitrum -l 100 --extra_output extra_out.csv
+              run: python3 runner.py -i contracts/arbitrum -l 100 --extra-output extra_out.csv
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
