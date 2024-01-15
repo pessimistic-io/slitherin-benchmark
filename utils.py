@@ -2,13 +2,14 @@ import re
 import ast
 import os
 import json
+import platform
 import slitherin
 
 from collections import namedtuple
 
 from storage import Storage
+from config import PLATFORM_DATA, SOLC_DIR
 
-SOLC_DIR = "solc-bin"
 
 def get_slitherin_detectors() -> list:
     return [detector.ARGUMENT for detector in slitherin.plugin_detectors]
@@ -36,6 +37,14 @@ def get_address(filename):
 Contract = namedtuple('Contract', 'address,chain_id,filename,compiler,detectors')
 DETECTORS = get_slitherin_detectors()
 
+def get_solc_dir():
+    p = platform.system()
+    solc_dir = os.path.join(SOLC_DIR, PLATFORM_DATA[platform.system()])
+    if os.path.isdir(solc_dir):
+        return solc_dir
+    else:
+        raise Exception(f"No solc directory in {SOLC_DIR} for platform {p}")
+
 def get_contracts(dir_name, detectors, new_contracts = False, new_detectors = False, limit = None):
     #connect db if need
     storage = Storage()
@@ -59,7 +68,7 @@ def get_contracts(dir_name, detectors, new_contracts = False, new_detectors = Fa
             yield Contract(
                 contract_info["address"], contract_info["chain_id"],
                 os.path.join(dir_name, contract_info["address"][2:4], contract_info["address"][2:]), 
-                os.path.join(SOLC_DIR, contract_info["compiler"]),
+                os.path.join(get_solc_dir(), contract_info["compiler"]),
                 detectors_to_check)
 
 if __name__ == "__main__":
