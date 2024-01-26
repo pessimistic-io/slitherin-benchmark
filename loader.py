@@ -82,22 +82,26 @@ def clean_imports(source:str, real_files:dict = None):
                     full_path.insert(0, file_name)
                     break
                 file_name = c + file_name
-            file_name = full_path[-1]
-            full_path = [p for p in full_path if p != '.' and p != '..']
-            if real_files is not None:
-                max_score = 0
-                for real_path, real_name in real_files.items():
-                    real_path = real_path.split('/')
-                    score = count_matching_elements_from_end(real_path, full_path)
-                    if score > max_score:
-                        max_score = score
-                        file_name = real_name
-
-            if ' from ' in line:
-                pre = line.split(" from ")[0]
-                cleaned_source += f"{pre} from \"./{file_name}\";\n"
+            if len(full_path) == 0:
+                print("zero_path", line)
+                cleaned_source += f"{line}\n"
             else:
-                cleaned_source += f"import \"./{file_name}\";\n"
+                file_name = full_path[-1]
+                full_path = [p for p in full_path if p != '.' and p != '..']
+                if real_files is not None:
+                    max_score = 0
+                    for real_path, real_name in real_files.items():
+                        real_path = real_path.split('/')
+                        score = count_matching_elements_from_end(real_path, full_path)
+                        if score > max_score:
+                            max_score = score
+                            file_name = real_name
+
+                if ' from ' in line:
+                    pre = line.split(" from ")[0]
+                    cleaned_source += f"{pre} from \"./{file_name}\";\n"
+                else:
+                    cleaned_source += f"import \"./{file_name}\";\n"
         else:
             cleaned_source += f"{line}\n"
     
@@ -205,13 +209,14 @@ async def amain(output, input, chain_id):
                     "name": response["name"],
                     "compiler": response["compiler"]
                 })+"\n")
+            
             for contract_file in response["files"]:
                 full_name = os.path.join(full_dir, contract_file["filename"])
                 print(f"makedirs {full_name}")
                 os.makedirs(os.path.dirname(full_name), exist_ok=True)
                 with open(full_name, 'w') as f_sol:
                     f_sol.write(contract_file["source"])
-
+        
 
 @click.command()
 @click.option('-o', '--output', help="directory to save results", required=True)
