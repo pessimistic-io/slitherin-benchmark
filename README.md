@@ -46,6 +46,8 @@ Options:
 -o, --output: File to save results.
 -eo, --extra-output: File to save extra results (address, detector name, lines).
 -i, --input: Directory with contracts.
+-sd, --skip-duplicates: Skip duplicate contracts(marked by contract_matcher).
+-sl, --skip-libs: Skip lib contracts(marked by contract_matcher).
 -nc, --new-contracts: Check only unchecked contracts.
 -nd, --new-detectors: Check contracts only with unchecked detectors.
 -t, --timeout: Stops benchmark after seconds.
