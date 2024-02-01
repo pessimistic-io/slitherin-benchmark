@@ -33,7 +33,7 @@ jobs:
             - name: Configure
               run: mv example.config.py config.py
             - name: Run Benchmark
-              run: python3 runner.py -i contracts/mainnet -l 100 --extra-output extra_out.csv
+              run: python runner.py -i contracts/mainnet -l 100 --extra-output extra_out.csv
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
@@ -65,7 +65,7 @@ jobs:
             - name: Configure
               run: mv example.config.py config.py
             - name: Run Benchmark
-              run: python3 runner.py -i contracts/arbitrum -l 100 --extra-output extra_out.csv
+              run: python runner.py -i contracts/arbitrum -l 100 --extra-output extra_out.csv
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
@@ -86,35 +86,25 @@ jobs:
                 node-version: '18.x'
             - name: Update pip
               run: python -m pip install --upgrade pip
-            - name: Install solc-select
-              run: python -m pip install solc-select
             - name: Install Slither
               run: python -m pip install slither-analyzer
             - name: Install Setuptools
               run: python -m pip install setuptools
             - name: Install Slitherin
-              run: python setup.py develop
-            - name: Configure
-              run: |
-                cd slitherin-benchmark/
-                mv example.config.py config.py
-            - name: Install node dependencies
-              run: npm ci
+              run: python -m pip install slitherin
             - name: Install benchmark requirements
-              run: |
-                cd slitherin-benchmark/
-                python -m pip install -r requirements.txt
+              run: python -m pip install -r requirements.txt
+            - name: Configure
+              run: mv example.config.py config.py
             - name: Run Benchmark
-              run: |
-                cd slitherin-benchmark/
-                python3 runner.py -i contracts/openzeppelin -o oz.csv -eo oz_extra.csv
-            - name: 'Upload Artifact'
-              uses: actions/upload-artifact@v3
-              with:
-                name: oz
-                path: slitherin-benchmark/oz.csv
+              run: python runner.py -i contracts/openzeppelin -o oz.csv -eo oz_extra.csv
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
                 name: oz_extra
-                path: slitherin-benchmark/oz_extra.csv
+                path: oz_extra.csv
+            - name: 'Upload Artifact'
+              uses: actions/upload-artifact@v3
+              with:
+                name: oz
+                path: oz.csv
