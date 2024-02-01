@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections import namedtuple
 
 Finding = namedtuple('Finding', 'address, filename, lines')
@@ -25,6 +26,8 @@ def slither_analyzer(output:str) -> dict[list[Finding]]:
             for element in detector_result['elements']:
                 path, fname = os.path.split(element['source_mapping']['filename_relative'])
                 address = f"0x{path[-40:]}"
+                if not re.match(r"[0-9]{40}", address):
+                    address = path
                 findings.append(Finding(address, fname, ",".join([str(l) for l in element['source_mapping']['lines']])))
             result[detector_result['check']] = findings
     elif not 'results' in output:

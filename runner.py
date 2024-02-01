@@ -52,18 +52,20 @@ def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
 @click.option('-o', '--output', help="file to save results", default=None)
 @click.option('-eo', '--extra-output', help="file to save extra results(address, detector name, lines)", default=None)
 @click.option('-i', '--input', help="directory with contracts")
+@click.option('-sd', '--skip-duplicates', is_flag=True, default=False, help="skip duplicate contracts(marked by contract_matcher).")
+@click.option('-sl', '--skip-libs', is_flag=True, default=False, help="skip lib contracts(marked by contract_matcher).")
 @click.option('-nc', '--new-contracts', is_flag=True, default=False, help="check only unchecked contracts.")
 @click.option('-nd', '--new-detectors', is_flag=True, default=False, help="check contracts only with unchecked detectors.")
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(DETECTORS), default=None, type=str)
 @click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=os.cpu_count(), type=int)
-def main(output, extra_output, input, new_contracts, new_detectors, timeout, limit, detect, pool):
+def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts, new_detectors, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.addHandler(handler)
     # Check params
     if detect is not None:
@@ -71,13 +73,13 @@ def main(output, extra_output, input, new_contracts, new_detectors, timeout, lim
     else:
         detectors = DETECTORS
     # Use multiprocessing Pool to run slitherin in parallel
-    logger.info("starting pool on %d cores contract limit %d", pool, limit)
+    logger.info("starting pool on %d cores contract", pool)
     detector_statistics = Counter()
     start_time = time.time()
     storage = Storage()
     with Pool(pool) as pool:
         for contract, detector_results in pool.imap(
-            process_file, get_contracts(input, detectors, new_contracts, new_detectors, limit)):
+            process_file, get_contracts(input, detectors, new_contracts, new_detectors, skip_duplicates, skip_libs, limit)):
             detector_statistics['total'] += 1
             for detector, findings in detector_results.items():
                 detector_statistics[detector] += 1
@@ -97,7 +99,7 @@ def main(output, extra_output, input, new_contracts, new_detectors, timeout, lim
     if output is not None:
         logger.info("Save stats to file %s", output)
         with open(output, 'w') as f:
-            f.write(df.to_csv(sep=';'))    	
+            f.write(df.to_csv(sep=';'))     
     
 if __name__ == "__main__":
     main()
