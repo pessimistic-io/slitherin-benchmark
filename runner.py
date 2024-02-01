@@ -8,7 +8,7 @@ import pandas as pd
 import click
 from datetime import timedelta
 
-from utils import DETECTORS, get_contracts, Contract
+from utils import DETECTORS, get_contracts, Contract, count_sol_files
 from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
 
@@ -80,13 +80,24 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
     with Pool(pool) as pool:
         for contract, detector_results in pool.imap(
             process_file, get_contracts(input, detectors, new_contracts, new_detectors, skip_duplicates, skip_libs, limit)):
-            detector_statistics['total'] += 1
+            count_files = (contract.address == "") #Not real contract, we check dir with files. Count stats by file.
             for detector, findings in detector_results.items():
-                detector_statistics[detector] += 1
-                if extra_output is not None:
+                increment = 1
+                if extra_output is not None or count_files:
+                    files_counter = Counter()
                     for finding in findings:
-                        with open(extra_output, 'a+') as f_extra:
-                            f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
+                        files_counter[f"{finding.address}{finding.filename}"] += 1
+                        if extra_output is not None:
+                            with open(extra_output, 'a+') as f_extra:
+                                f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
+                        if count_files:
+                            increment = len(files_counter)
+                detector_statistics[detector] += increment
+            if not count_files:
+                detector_statistics['total'] += 1
+            else:
+                detector_statistics['total'] += count_sol_files(contract.filename)
+    
             for detector in contract.detectors:
                 storage.set_contract_checked(contract.address, contract.chain_id, detector)
                 

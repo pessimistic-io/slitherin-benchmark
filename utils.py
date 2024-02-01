@@ -82,11 +82,18 @@ def get_contracts(dir_name, detectors, new_contracts = False, new_detectors = Fa
             if os.path.isdir(project_path) or project_path.endswith('.sol'):
                 yield Contract("", "", project_path, os.path.join(get_solc_dir(), "v0.8.20+commit.a1b79de6"), detectors)
 
+def count_sol_files(dir_name:str) -> int:
+    c = 0
+    for fname in os.listdir(dir_name):
+        full_fname = os.path.join(dir_name,fname)
+        if os.path.isdir(full_fname):
+            c += count_sol_files(full_fname)
+        elif fname.endswith(".sol"):
+            c += 1
+    return c
+
 if __name__ == "__main__":
-    folder_path = os.path.join("..", "detectors")
-    argument_values = extract_detectors(folder_path)
-    print("Unique ARGUMENT values:")
-    for x in argument_values:
-        #if 'reentrancy' in x[0]:
-        print(x)
+    folder_path = os.path.join("contracts", "openzeppelin", "governance")
+    print(count_sol_files(folder_path))
+
 
