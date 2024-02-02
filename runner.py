@@ -11,6 +11,7 @@ from datetime import timedelta
 from utils import DETECTORS, get_contracts, Contract, count_sol_files
 from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
+from config import LOGGING_LEVEL
 
 def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
@@ -65,7 +66,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(LOGGING_LEVEL)
     logger.addHandler(handler)
     # Check params
     if detect is not None:
