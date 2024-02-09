@@ -36,8 +36,10 @@ jobs:
               run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv
             - name: Upload sheet
               run: |
-                echo ${{ secrets.service_account }} > service_account.json
+                echo $GOOGLE_JWT > service_account.json
                 python save_sheet.py -i out.csv -sa service_account.json -si ${{ secrets.sheet_id }} -ln test
+              env:
+                GOOGLE_JWT : ${{secrets.service_account}}
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
@@ -72,8 +74,10 @@ jobs:
               run: python runner.py -i contracts/mainnet -l 100 --extra-output extra_out.csv
             - name: Upload sheet
               run: |
-                echo ${{ secrets.service_account }} > service_account.json
+                echo $GOOGLE_JWT > service_account.json
                 python save_sheet.py -i out.csv -sa service_account.json -si ${{ secrets.sheet_id }} -ln test
+              env:
+                GOOGLE_JWT : ${{secrets.service_account}}
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
