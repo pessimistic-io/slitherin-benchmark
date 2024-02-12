@@ -33,7 +33,7 @@ jobs:
             - name: Configure
               run: mv example.config.py config.py
             - name: Run Benchmark
-              run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv
+              run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs
             - name: Upload sheet
               run: |
                 echo $GOOGLE_JWT > service_account.json
