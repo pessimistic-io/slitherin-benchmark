@@ -7,13 +7,14 @@ from collections import Counter
 import pandas as pd
 import click
 from datetime import timedelta
+from functools import partial
 
 from utils import DETECTORS, get_contracts, Contract, count_sol_files
 from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
 from config import LOGGING_LEVEL
 
-def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
+def process_file(contract: Contract, use_slither: bool = False) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
     Args:
         contract: contract to analyze.
@@ -24,7 +25,7 @@ def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
         # Run slitherin command and capture output
         # slitherin --pess tests/multiple_storage_read_test.sol --json -
         logger = logging.getLogger()
-        command = ['slitherin', '--detect', ','.join(contract.detectors), contract.filename, '--json', '-']
+        command = ['slither' if use_slither else 'slitherin', '--fail-none', '--detect', ','.join(contract.detectors), contract.filename, '--json', '-']
         if contract.compiler is not None:
             command.append("--solc")
             command.append(contract.compiler)
@@ -39,13 +40,13 @@ def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
             logger.error("SlitherOutError(%s) during command: %s" % (e.args[0], " ".join(command)))
             return contract, {'error': []} #TODO decide if we need e.args[0] message?
         except Exception as e:
-            logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d out=_%s_", contract.filename, result.stdout, len(result.stdout), len(slitherin_out), result.stdout)
+            logger.exception("error analyzer filename %s output = _%s_ outlen=%d outlen_line1=%d", contract.filename, result.stdout, len(result.stdout), len(slitherin_out))
             return contract, {"error": []}
         # Return filename and detector results
         return contract, detector_results
     except subprocess.CalledProcessError as e:
         # Handle any errors that occur during slitherin execution
-        logger.error("%s returned %s: %s", e.returncode, contract.filename, e.output)
+        logger.error("%s returned %s", e.returncode, contract.filename)
         return contract, {'error': []}
 
 
@@ -57,11 +58,12 @@ def process_file(contract: Contract) -> tuple[Contract, dict[str, list]]:
 @click.option('-sl', '--skip-libs', is_flag=True, default=False, help="skip lib contracts(marked by contract_matcher).")
 @click.option('-nc', '--new-contracts', is_flag=True, default=False, help="check only unchecked contracts.")
 @click.option('-nd', '--new-detectors', is_flag=True, default=False, help="check contracts only with unchecked detectors.")
+@click.option('-us', '--use-slither', is_flag=True, default=False, help="use slither instead of slitherin")
 @click.option('-t', '--timeout', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-l', '--limit', help="stops benchmark after seconds", default=None, type=int)
 @click.option('-d', '--detect', help=f"Comma-separated list of detectors, defaults to slitherin detectors: %s" % ",".join(DETECTORS), default=None, type=str)
 @click.option('-p', '--pool', help="number of process pools, defaults to cpu count", default=os.cpu_count(), type=int)
-def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts, new_detectors, timeout, limit, detect, pool):
+def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts, new_detectors, use_slither, timeout, limit, detect, pool):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
@@ -80,7 +82,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
     storage = Storage()
     with Pool(pool) as pool:
         for contract, detector_results in pool.imap(
-            process_file, get_contracts(input, detectors, new_contracts, new_detectors, skip_duplicates, skip_libs, limit)):
+            partial(process_file, use_slither=use_slither), get_contracts(input, detectors, new_contracts, new_detectors, skip_duplicates, skip_libs, limit)):
             count_files = (contract.address == "") #Not real contract, we check dir with files. Count stats by file.
             for detector, findings in detector_results.items():
                 increment = 1
