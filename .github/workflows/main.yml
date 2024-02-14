@@ -109,11 +109,14 @@ jobs:
             - name: Install benchmark requirements
               run: python -m pip install -r requirements.txt
             - name: Configure
-              run: mv example.config.py config.py
+              run: |
+                mv example.config.py config.py
+                echo "LOGGING_LEVEL = logging.DEBUG" > config.py
             - name: Run Benchmark
               run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs -us
             - name: Upload sheet
               run: |
+                cat out.csv
                 echo $GOOGLE_JWT > service_account.json
                 python save_sheet.py -i out.csv -sa service_account.json -si $GOOGLE_SHEET_ID -ln test
               env:
