@@ -20,4 +20,4 @@ PLATFORM_DATA = {
     'Linux': 'linux-amd64'
 }
 
-LOGGING_LEVEL = logging.INFO
+LOGGING_LEVEL = logging.DEBUG
