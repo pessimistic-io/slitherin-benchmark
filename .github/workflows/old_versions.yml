@@ -35,7 +35,7 @@ jobs:
                 mv example.config.py config.py
                 slither --list-detectors
             - name: Run Benchmark
-              run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs
+              run: python runner.py -us -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs
             - name: Upload sheet
               run: |
                 echo $GOOGLE_JWT > service_account.json
@@ -76,7 +76,7 @@ jobs:
                 mv example.config.py config.py
                 slither --list-detectors
             - name: Run Benchmark
-              run: python runner.py -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs
+              run: python runner.py -us -i contracts/mainnet -l 100 --output out.csv --extra-output extra_out.csv --skip-duplicates --skip-libs
             - name: Upload sheet
               run: |
                 echo $GOOGLE_JWT > service_account.json
