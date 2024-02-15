@@ -56,7 +56,7 @@ def get_address(filename):
 
 Contract = namedtuple('Contract', 'address,chain_id,filename,compiler,detectors')
 DETECTORS = get_slitherin_detectors()
-
+print(DETECTORS)
 def get_solc_dir():
     p = platform.system()
     solc_dir = os.path.join(SOLC_DIR, PLATFORM_DATA[platform.system()])
