@@ -9,11 +9,13 @@ import click
 from datetime import timedelta
 from functools import partial
 
-from utils import DETECTORS, get_contracts, Contract, count_sol_files
+from utils import get_contracts, Contract, count_sol_files, get_slitherin_detectors
 from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
 from config import LOGGING_LEVEL
 
+DETECTORS = get_slitherin_detectors()
+print("detectors in runner", DETECTORS)
 def process_file(contract: Contract, use_slither: bool = False) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
     Args:
