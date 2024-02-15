@@ -27,11 +27,12 @@ def get_slitherin_detectors() -> list:
     try:
         command = ['slither', '--list-detectors']
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
-        
+        print(result.stdout)
         header, detectors = parseAsciiTable(result.stdout)
-        
+        print(detectors)
         return [d[2] for d in detectors if len(d)>2 and d[2].startswith('pess-')]
     except subprocess.CalledProcessError as e:
+        print("exception", e)
         return []
    
 def get_solc_path(comp_ver):
@@ -56,7 +57,7 @@ def get_address(filename):
 
 Contract = namedtuple('Contract', 'address,chain_id,filename,compiler,detectors')
 DETECTORS = get_slitherin_detectors()
-print(DETECTORS)
+
 def get_solc_dir():
     p = platform.system()
     solc_dir = os.path.join(SOLC_DIR, PLATFORM_DATA[platform.system()])
