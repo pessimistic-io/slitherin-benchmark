@@ -20,13 +20,14 @@ def get_slitherin_version():
 @click.option('-sa', '--service-account', help="google service account json file", required=True)
 @click.option('-si', '--sheet-id', help="google sheet id", required=True)
 @click.option('-ln', '--list-name', help="google list name", required=True)
-def main(input, service_account, sheet_id, list_name):
+@click.option('-sv', '--slitherin-version', help="slitherin version, default value taken from slitherin --version command", required=False, default=get_slitherin_version())
+def main(input, service_account, sheet_id, list_name, slitherin_version):
     sheet = Sheet(service_account, sheet_id, list_name)
     values = sheet.get_rows("A1:ZZZ")
     detector_names = values[0][DETECTOR_COL_NUM:]
 
     detector_col_by_name = {detector_names[i]:(i+DETECTOR_COL_NUM) for i in range(0, len(detector_names))}
-    new_row = [round(time.time()), get_slitherin_version()] + ['']*len(detector_names)
+    new_row = [round(time.time()), slitherin_version] + ['']*len(detector_names)
     new_columns = []
     with open(input, 'r') as f:
         for line in f:
