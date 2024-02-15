@@ -4,15 +4,21 @@ import os
 import json
 import platform
 import subprocess
+import re
 from collections import namedtuple
 
 from storage import Storage
 from config import PLATFORM_DATA, SOLC_DIR
 
-def parseAsciiTable(ascii_table: str):
+def escape_ansi(line):
+    ansi_escape =re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
+    return ansi_escape.sub('', line)
+
+def parse_ascii_table(ascii_table: str):
     header = []
     data = []
     for line in ascii_table.split('\n'):
+      line = escape_ansi(line)
       if '-+-' in line: continue
       cells = list(filter(lambda x: x!='|', line.split('|')))
       striped_cells = list(map(lambda c: c.strip(), cells))
@@ -28,7 +34,7 @@ def get_slitherin_detectors() -> list:
         command = ['slither', '--list-detectors']
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
         print(result.stdout)
-        header, detectors = parseAsciiTable(result.stdout)
+        header, detectors = parse_ascii_table(result.stdout)
         print(detectors)
         return [d[2] for d in detectors if len(d)>2 and d[2].startswith('pess-')]
     except subprocess.CalledProcessError as e:
