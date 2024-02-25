@@ -99,13 +99,13 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
                         if count_files:
                             increment = len(files_counter)
                 detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
-                detector_statistics[FINDING_STAT_TYPE_NAME][detector] += len(findings)
+                count_findings = len(findings)
+                if count_findings > 0:
+                    detector_statistics[FINDING_STAT_TYPE_NAME][detector] += count_findings
             sol_files = count_sol_files(contract.filename)
             for stat_type in detector_statistics:
-                if count_files:
-                    detector_statistics[stat_type]['files'] += sol_files
-                else:
-                    detector_statistics[stat_type]['contracts'] += 1
+                detector_statistics[stat_type]['files'] += sol_files
+                detector_statistics[stat_type]['contracts'] += 1
 
             for detector in contract.detectors:
                 storage.set_contract_checked(contract.address, contract.chain_id, detector)
