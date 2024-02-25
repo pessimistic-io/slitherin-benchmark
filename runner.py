@@ -14,6 +14,9 @@ from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
 from config import LOGGING_LEVEL
 
+CONTRACT_STAT_TYPE_NAME = 'by_contract'
+FINDING_STAT_TYPE_NAME = 'by_finding'
+
 def process_file(contract: Contract, use_slither: bool = False) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
     Args:
@@ -77,7 +80,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
         detectors = DETECTORS
     # Use multiprocessing Pool to run slitherin in parallel
     logger.info("starting pool on %d cores contract", pool)
-    detector_statistics = Counter()
+    detector_statistics = { CONTRACT_STAT_TYPE_NAME: Counter(), FINDING_STAT_TYPE_NAME: Counter() }
     start_time = time.time()
     storage = Storage()
     with Pool(pool) as pool:
@@ -95,12 +98,15 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
                                 f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
                         if count_files:
                             increment = len(files_counter)
-                detector_statistics[detector] += increment
-            if not count_files:
-                detector_statistics['total'] += 1
-            else:
-                detector_statistics['total'] += count_sol_files(contract.filename)
-    
+                detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
+                detector_statistics[FINDING_STAT_TYPE_NAME][detector] += len(findings)
+            sol_files = count_sol_files(contract.filename)
+            for stat_type in detector_statistics:
+                if count_files:
+                    detector_statistics[stat_type]['files'] += sol_files
+                else:
+                    detector_statistics[stat_type]['contracts'] += 1
+
             for detector in contract.detectors:
                 storage.set_contract_checked(contract.address, contract.chain_id, detector)
                 
