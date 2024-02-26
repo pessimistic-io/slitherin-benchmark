@@ -98,12 +98,15 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
                                 f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
                         if count_files:
                             increment = len(files_counter)
-                detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
+                if not count_files:
+                    detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
                 count_findings = len(findings)
                 if count_findings > 0:
                     detector_statistics[FINDING_STAT_TYPE_NAME][detector] += count_findings
             sol_files = count_sol_files(contract.filename)
             for stat_type in detector_statistics:
+                if count_files and stat_type ==  CONTRACT_STAT_TYPE_NAME:
+                    continue
                 detector_statistics[stat_type]['files'] += sol_files
                 detector_statistics[stat_type]['contracts'] += 1
 
@@ -113,6 +116,9 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
             if timeout is not None and time.time() - start_time > timeout:
                 logger.info("timeout stop, processed %d tasks", detector_statistics['total'])
                 break
+    for stat_type in list(detector_statistics.keys()):
+        if len(detector_statistics[stat_type]) == 0:
+            del detector_statistics[stat_type]
     logger.info("completed pool in %s", str(timedelta(seconds=round(time.time()-start_time))))
     df = pd.DataFrame.from_dict(detector_statistics, orient='index')
     print(df.to_markdown())
