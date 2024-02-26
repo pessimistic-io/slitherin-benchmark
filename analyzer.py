@@ -29,7 +29,10 @@ def slither_analyzer(output:str) -> dict[list[Finding]]:
                 if not re.match(r"[0-9]{40}", address):
                     address = path
                 findings.append(Finding(address, fname, ",".join([str(l) for l in element['source_mapping']['lines']])))
-            result[detector_result['check']] = findings
+            if detector_result['check'] in result:
+                result[detector_result['check']] += findings
+            else:    
+                result[detector_result['check']] = findings
     elif not 'results' in output:
         raise SlitherOutError('no results')
     return result

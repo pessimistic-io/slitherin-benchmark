@@ -14,6 +14,9 @@ from analyzer import slither_analyzer, SlitherOutError
 from storage import Storage
 from config import LOGGING_LEVEL
 
+CONTRACT_STAT_TYPE_NAME = 'by_contract'
+FINDING_STAT_TYPE_NAME = 'by_finding'
+
 def process_file(contract: Contract, use_slither: bool = False) -> tuple[Contract, dict[str, list]]:
     """Run subproccess contract processing
     Args:
@@ -77,7 +80,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
         detectors = DETECTORS
     # Use multiprocessing Pool to run slitherin in parallel
     logger.info("starting pool on %d cores contract", pool)
-    detector_statistics = Counter()
+    detector_statistics = { CONTRACT_STAT_TYPE_NAME: Counter(), FINDING_STAT_TYPE_NAME: Counter() }
     start_time = time.time()
     storage = Storage()
     with Pool(pool) as pool:
@@ -95,25 +98,34 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
                                 f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
                         if count_files:
                             increment = len(files_counter)
-                detector_statistics[detector] += increment
-            if not count_files:
-                detector_statistics['total'] += 1
-            else:
-                detector_statistics['total'] += count_sol_files(contract.filename)
-    
+                if not count_files:
+                    detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
+                count_findings = len(findings)
+                if count_findings > 0:
+                    detector_statistics[FINDING_STAT_TYPE_NAME][detector] += count_findings
+            sol_files = count_sol_files(contract.filename)
+            for stat_type in detector_statistics:
+                if count_files and stat_type ==  CONTRACT_STAT_TYPE_NAME:
+                    continue
+                detector_statistics[stat_type]['files'] += sol_files
+                detector_statistics[stat_type]['contracts'] += 1
+
             for detector in contract.detectors:
                 storage.set_contract_checked(contract.address, contract.chain_id, detector)
                 
             if timeout is not None and time.time() - start_time > timeout:
                 logger.info("timeout stop, processed %d tasks", detector_statistics['total'])
                 break
+    for stat_type in list(detector_statistics.keys()):
+        if len(detector_statistics[stat_type]) == 0:
+            del detector_statistics[stat_type]
     logger.info("completed pool in %s", str(timedelta(seconds=round(time.time()-start_time))))
     df = pd.DataFrame.from_dict(detector_statistics, orient='index')
     print(df.to_markdown())
     if output is not None:
         logger.info("Save stats to file %s", output)
         with open(output, 'w') as f:
-            f.write(df.to_csv(sep=';'))     
+            f.write(df.to_csv(sep=';', float_format='%.0f'))     
     
 if __name__ == "__main__":
     main()
