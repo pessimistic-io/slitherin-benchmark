@@ -119,7 +119,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
     if output is not None:
         logger.info("Save stats to file %s", output)
         with open(output, 'w') as f:
-            f.write(df.to_csv(sep=';'))     
+            f.write(df.to_csv(sep=';', float_format='%.0f'))     
     
 if __name__ == "__main__":
     main()
