@@ -57,3 +57,24 @@ Options:
 ```
 
 The runner uses SQLite to save information about which contracts were checked with which detectors. Use the --new-contracts and --new-detectors flags to skip already checked contracts.
+
+## Analyze results
+### Results file
+Benchmark runs with the --output option save results to a CSV file. Columns represent detector names, and rows indicate statistical counters. Two count methods are available: 'by_contract' counts the number of contracts with at least one finding for the detector, while 'by_finding' tallies the total number of findings detected during the benchmark run for each detector.
+### Google sheets
+You can upload results to google sheets table using save_sheet.py script. There must be list with names for each count method(list_by_contract and list_by_finding). 
+```bash
+python save_sheet.py --help
+Usage: save_sheet.py [OPTIONS]
+
+Options:
+  -i, --input TEXT               file with benchmark results  [required]
+  -sa, --service-account TEXT    google service account json file  [required]
+  -si, --sheet-id TEXT           google sheet id  [required]
+  -ln, --list-name TEXT          google list name  [required]
+  -sv, --slitherin-version TEXT  slitherin version, default value taken from
+                                 slitherin --version command
+```
+Slitherin project's CI pipeline uploads data to [google sheets](https://docs.google.com/spreadsheets/d/1PAMA7iTkqx2YpmqCOwTZX-HYwkd8MFXnguxPqWQP3ns)
+### Grafana
+We visualize the results of slitherin benchmark through the [Grafana](https://slitherin.grafana.net/public-dashboards/86ed7d9dbb1b4b22acf7a25353f0e328?orgId=1).
