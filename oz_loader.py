@@ -34,7 +34,7 @@ def load_oz_hashes():
     return oz_hashes
 
 @click.command()
-@click.option('-o', '--output', help="file to save hashes")
+@click.option('-o', '--output', help="file to save hashes", required=True)
 def main(output):
     oz_hashes = load_oz_hashes()
     print(oz_hashes)

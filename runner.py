@@ -12,7 +12,6 @@ from functools import partial
 from database.contracts import get_contracts, Contract
 from utils.slither import get_slitherin_detectors, slither_analyzer, SlitherOutError
 from utils.sol import count_sol_files
-from analyzer import slither_analyzer, SlitherOutError
 from database.storage import Storage
 from config import LOGGING_LEVEL
 
@@ -60,7 +59,7 @@ def process_file(contract: Contract, use_slither: bool = False) -> tuple[Contrac
 @click.command()
 @click.option('-o', '--output', help="file to save results", default=None)
 @click.option('-eo', '--extra-output', help="file to save extra results(address, detector name, lines)", default=None)
-@click.option('-i', '--input', help="directory with contracts")
+@click.option('-i', '--input', help="directory with contracts", required=True)
 @click.option('-sd', '--skip-duplicates', is_flag=True, default=False, help="skip duplicate contracts(marked by contract_matcher).")
 @click.option('-sl', '--skip-libs', is_flag=True, default=False, help="skip lib contracts(marked by contract_matcher).")
 @click.option('-nc', '--new-contracts', is_flag=True, default=False, help="check only unchecked contracts.")
