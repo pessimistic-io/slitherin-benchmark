@@ -3,7 +3,7 @@ import click
 import subprocess
 import logging
 
-from google.sheet import Sheet
+from sheet import Sheet
 from config import LOGGING_LEVEL
 
 DETECTOR_COL_NUM = 2
