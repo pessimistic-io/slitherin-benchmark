@@ -9,10 +9,14 @@ import click
 from datetime import timedelta
 from functools import partial
 
-from utils import DETECTORS, get_contracts, Contract, count_sol_files
+from database.contracts import get_contracts, Contract
+from utils.slither import get_slitherin_detectors, slither_analyzer, SlitherOutError
+from utils.sol import count_sol_files
 from analyzer import slither_analyzer, SlitherOutError
-from storage import Storage
+from database.storage import Storage
 from config import LOGGING_LEVEL
+
+DETECTORS = get_slitherin_detectors()
 
 CONTRACT_STAT_TYPE_NAME = 'by_contract'
 FINDING_STAT_TYPE_NAME = 'by_finding'

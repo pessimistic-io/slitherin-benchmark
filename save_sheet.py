@@ -1,10 +1,9 @@
-from datetime import datetime
 import time
 import click
 import subprocess
 import logging
 
-from sheet import Sheet
+from google.sheet import Sheet
 from config import LOGGING_LEVEL
 
 DETECTOR_COL_NUM = 2

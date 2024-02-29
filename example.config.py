@@ -21,3 +21,11 @@ PLATFORM_DATA = {
 }
 
 LOGGING_LEVEL = logging.INFO
+
+DB_NAME = 'contracts.db'
+
+# contract_matcher config block
+OZ_HASHES_FILE = "oz_hashes.json"
+POPULAR_HASHES_FILE = "popular_hashes.json"
+SIMILAR_KOEFF = 0.5
+SIMILAR_KOEFF_LINES = 0.3

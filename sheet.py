@@ -1,4 +1,3 @@
-import os
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
@@ -100,5 +99,3 @@ class Sheet:
                 ]
             }
             self.service.spreadsheets().batchUpdate(spreadsheetId=self.sheet_id, body=body).execute()
-
-
