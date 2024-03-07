@@ -7,25 +7,26 @@ from sheet import Sheet
 from config import LOGGING_LEVEL
 
 DETECTOR_COL_NUM = 2
+SLITHER = 'slither'
+SLITHERIN = 'slitherin'
 
-def get_slitherin_version():
-    command = ['slitherin', '--version']
+def get_version(command_name:str) -> str:
+    command = [command_name, '--version']
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
         return result.stdout.split('\n')[0].strip()
     except Exception as e:
         return ''
 
-def save_sheet(results, service_account, sheet_id, list_name, slitherin_version):
+def save_sheet(results:dict, service_account:str, sheet_id:str, list_name:str, required_row_values:list) -> None:
     logger = logging.getLogger()
     logger.info("save results for %d detectors to list %s", len(results), list_name)
-    print(results)
     sheet = Sheet(service_account, sheet_id, list_name)
     values = sheet.get_rows("A1:ZZZ")
     detector_names = values[0][DETECTOR_COL_NUM:]
 
     detector_col_by_name = {detector_names[i]:(i+DETECTOR_COL_NUM) for i in range(0, len(detector_names))}
-    new_row = [round(time.time()), slitherin_version] + ['']*len(detector_names)
+    new_row = [round(time.time())] + required_row_values + ['']*len(detector_names)
     new_columns = []
     for detector_name in results:
         if detector_name in detector_col_by_name:
@@ -44,8 +45,9 @@ def save_sheet(results, service_account, sheet_id, list_name, slitherin_version)
 @click.option('-sa', '--service-account', help="google service account json file", required=True)
 @click.option('-si', '--sheet-id', help="google sheet id", required=True)
 @click.option('-ln', '--list-name', help="google list name", required=True)
-@click.option('-sv', '--slitherin-version', help="slitherin version, default value taken from slitherin --version command", required=False, default=get_slitherin_version())
-def main(input, service_account, sheet_id, list_name, slitherin_version):
+@click.option('-sv', '--slitherin-version', help="slitherin version, default value taken from slitherin --version command", required=False, default=get_version(SLITHERIN))
+@click.option('-pr', '--pr-number', help="google list name", required=False, default='')
+def main(input, service_account, sheet_id, list_name, slitherin_version, pr_number):
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s: %(asctime)s - %(process)s - %(message)s"))
 
@@ -63,7 +65,7 @@ def main(input, service_account, sheet_id, list_name, slitherin_version):
                 continue
             detector_results[stat_type] = dict(zip(detector_names, c))
         for stat_type in detector_results:
-            save_sheet(detector_results[stat_type], service_account, sheet_id, f"{list_name}_{stat_type}", slitherin_version)
+            save_sheet(detector_results[stat_type], service_account, sheet_id, f"{list_name}_{stat_type}", [get_version(SLITHER), slitherin_version, pr_number])
 
 if __name__ == "__main__":
     main()
