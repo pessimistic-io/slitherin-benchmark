@@ -21,6 +21,7 @@ def get_version(command_name:str) -> str:
 def save_sheet(results:dict, service_account:str, sheet_id:str, list_name:str, required_row_values:list) -> None:
     logger = logging.getLogger()
     logger.info("save results for %d detectors to list %s", len(results), list_name)
+    logger.info("required row values:%s", ",".join(required_row_values))
     sheet = Sheet(service_account, sheet_id, list_name)
     values = sheet.get_rows("A1:ZZZ")
     detector_names = values[0][DETECTOR_COL_NUM:]
