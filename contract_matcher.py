@@ -3,22 +3,23 @@ import click
 import os
 import json
 import difflib
+from tqdm import tqdm
+
+from config import OZ_HASHES_FILE, POPULAR_HASHES_FILE, SIMILAR_KOEFF_LINES, SIMILAR_KOEFF
 
 from oz_loader import load_oz_hashes
-from tqdm import tqdm
 
 CONTRACT_HASHES = {}
 CONTRACTS_BY_HASH = {}
-OZ_HASHES_FILE = "oz_hashes.json"
-POPULAR_HASHES_FILE = "popular_hashes.json"
-SIMILAR_KOEFF = 0.5
-SIMILAR_KOEFF_LINES = 0.3
 
-def get_hashes_from_file(fname):
+def get_hashes_from_file(fname:str) -> list[str]:
     with open(fname, 'r') as f:
         return json.load(f)
 
-def preload_hashes():
+def preload_hashes() -> list[str]:
+    """Loads hashes from files OZ_HASHES_FILE, POPULAR_HASHES_FILE.
+    If OZ_HASHES_FILE doesn't exists loads all versions OZ libs from repo and counts hashes.
+    """
     if os.path.isfile(OZ_HASHES_FILE):
         oz_hashes = get_hashes_from_file(OZ_HASHES_FILE)
     else:

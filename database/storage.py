@@ -1,7 +1,7 @@
 import sqlite3
 from threading import Lock
 
-DB_NAME = 'contracts.db'
+from config import DB_NAME
 
 def sync (lock):
     def function (f):
@@ -98,4 +98,5 @@ class Storage:
         ''', (address, chain_id))
         results = cursor.fetchall()
         return [row[0] for row in results]
+
 
