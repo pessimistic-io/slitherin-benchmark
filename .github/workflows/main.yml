@@ -39,10 +39,11 @@ jobs:
             - name: Upload sheet
               run: |
                 echo $GOOGLE_JWT > service_account.json
-                python save_sheet.py -i out.csv -sa service_account.json -si $GOOGLE_SHEET_ID -ln test
+                python save_sheet.py -i out.csv -sa service_account.json -si $GOOGLE_SHEET_ID -ln test -pr $PR_NUMBER
               env:
                 GOOGLE_JWT : ${{secrets.SERVICE_ACCOUNT}}
                 GOOGLE_SHEET_ID : ${{ secrets.GOOGLE_SHEET_ID }}
+                PR_NUMBER: ${{ github.event.number }}
             - name: 'Upload Artifact'
               uses: actions/upload-artifact@v3
               with:
