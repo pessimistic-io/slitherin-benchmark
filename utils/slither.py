@@ -5,6 +5,8 @@ import os
 import re
 from collections import namedtuple
 
+import slitherin
+
 Finding = namedtuple('Finding', 'address, filename, lines')
 class SlitherOutError(Exception):
     pass
@@ -59,6 +61,9 @@ def parse_ascii_table(ascii_table: str):
     return header, data
 
 def get_slitherin_detectors() -> list:
+    return [x.ARGUMENT for x in slitherin.plugin_detectors]
+
+def get_slitherin_detectors_from_slither() -> list:
     try:
         command = ['slither', '--list-detectors']
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
