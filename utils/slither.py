@@ -60,6 +60,13 @@ def parse_ascii_table(ascii_table: str):
 
 def get_slitherin_detectors() -> list:
     try:
+        import slitherin
+        return [x.ARGUMENT for x in slitherin.plugin_detectors]
+    except ModuleNotFoundError:
+        return get_slitherin_detectors_from_slither()
+
+def get_slitherin_detectors_from_slither() -> list:
+    try:
         command = ['slither', '--list-detectors']
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf8")
         header, detectors = parse_ascii_table(result.stdout)
