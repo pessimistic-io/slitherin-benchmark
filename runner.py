@@ -98,7 +98,7 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
                         files_counter[f"{finding.address}{finding.filename}"] += 1
                         if extra_output is not None:
                             with open(extra_output, 'a+') as f_extra:
-                                f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
+                                f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\";\"{finding.description}\"\n")
                         if count_files:
                             increment = len(files_counter)
                 if not count_files:
