@@ -5,7 +5,7 @@ import os
 import re
 from collections import namedtuple
 
-Finding = namedtuple('Finding', 'address, filename, lines, description')
+Finding = namedtuple('Finding', 'address, filename, description')
 class SlitherOutError(Exception):
     pass
 
@@ -31,7 +31,7 @@ def slither_analyzer(output:str) -> dict[list[Finding]]:
                 address = f"0x{path[-40:]}"
                 if not re.match(r"[0-9]{40}", address):
                     address = path
-                findings.append(Finding(address, fname, ",".join([str(l) for l in element['source_mapping']['lines']]), description if i == 0 else ''))
+                findings.append(Finding(address, fname, description))
             if detector_result['check'] in result:
                 result[detector_result['check']] += findings
             else:    
