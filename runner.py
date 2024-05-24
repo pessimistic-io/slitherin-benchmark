@@ -92,18 +92,24 @@ def main(output, extra_output, input, skip_duplicates, skip_libs, new_contracts,
             count_files = (contract.address == "") #Not real contract, we check dir with files. Count stats by file.
             for detector, findings in detector_results.items():
                 increment = 1
-                if extra_output is not None or count_files:
+                count_findings = len(findings)
+                if extra_output is not None and count_findings > 0:
+                    filenames_with_findings = set()
+                    description = ''
+                    for finding in findings:
+                        filenames_with_findings.add(finding.filename)
+                        if description != finding.description:
+                            with open(extra_output, 'a+') as f_extra:
+                                f_extra.write(f"{finding.address};\"{','.join(filenames_with_findings)}\";{detector};\"{finding.description}\"\n")
+                            description = finding.description
+                            filenames_with_findings = set()
+                if count_files:
                     files_counter = Counter()
                     for finding in findings:
                         files_counter[f"{finding.address}{finding.filename}"] += 1
-                        if extra_output is not None:
-                            with open(extra_output, 'a+') as f_extra:
-                                f_extra.write(f"{finding.address};{finding.filename};{detector};\"{finding.lines}\"\n")
-                        if count_files:
-                            increment = len(files_counter)
+                    increment = len(files_counter)
                 if not count_files:
                     detector_statistics[CONTRACT_STAT_TYPE_NAME][detector] += increment
-                count_findings = len(findings)
                 if count_findings > 0:
                     detector_statistics[FINDING_STAT_TYPE_NAME][detector] += count_findings
             sol_files = count_sol_files(contract.filename)
